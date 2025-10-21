@@ -1,0 +1,36 @@
+{
+    "copilot.description": "Proyecto ESP32 TTGO T-Display multi-modo: contador/generador pulsos, sensor presión I2C, WiFi scanner",
+    "copilot.context": {
+        "hardware": "ESP32-S3 TTGO T-Display 240x135",
+        "framework": "Arduino ESP32",
+        "libraries": ["TFT_eSPI", "Wire", "WiFi", "esp_sleep"],
+        "constraints": {
+            "memory": "limited RAM - optimize usage",
+            "cpu": "single-core - avoid blocking operations",
+            "display": "small screen - minimal UI",
+            "power": "battery powered - aggressive power management"
+        }
+    },
+    "copilot.patterns": {
+        "required": [
+            "circular arrays for graphs (200 points max)",
+            "static variables to avoid unnecessary redraws", 
+            "button debounce (300ms minimum)",
+            "I2C validation before use",
+            "updateActivity() on user interaction"
+        ],
+        "antipatterns": [
+            "delay() in main loop",
+            "excessive String concatenation",
+            "unnecessary full screen redraws",
+            "I2C reads without timeout",
+            "uninitialized global variables"
+        ]
+    },
+    "copilot.naming": {
+        "variables": "Spanish for domain clarity",
+        "functions": "Spanish descriptive (mostrarVoltaje, actualizarGrafico)",
+        "constants": "UPPERCASE with descriptive prefix",
+        "comments": "Spanish for technical details"
+    }
+}

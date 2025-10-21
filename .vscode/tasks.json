@@ -1,0 +1,29 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PlatformIO Upload",
+			"type": "shell",
+			"command": "platformio",
+			"args": [
+				"run",
+				"--target",
+				"upload"
+			],
+			"group": "build",
+			"problemMatcher": [
+				"$platformio"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Build Project",
+			"type": "shell",
+			"command": "~/.platformio/penv/bin/platformio",
+			"args": [
+				"run"
+			],
+			"group": "build"
+		}
+	]
+}

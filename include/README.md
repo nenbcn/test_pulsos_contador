@@ -1,0 +1,1 @@
+# This file provides information about the include directory, which is typically used for header files.
