@@ -74,7 +74,7 @@ Ver especificaciones completas: [`docs/pulse_implementation_guide.md`](docs/puls
 
 ### 3. MODE_PRESSURE (Sensor I2C)
 - Lee sensor WNK1MA a 100Hz (cada 10ms)
-- Gráfico con auto-escalado dinámico
+- Gráfico con escalado histórico (min/max desde inicio)
 - Comunicación I2C a 100kHz (estabilidad)
 
 ### 4. MODE_WIFI_SCAN (WiFi)

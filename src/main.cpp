@@ -3,14 +3,15 @@
 #include "esp_sleep.h"
 #include <WiFi.h>
 #include <Wire.h>
+#include <float.h>
 
 #define BUTTON_LEFT 0   // GPIO0 (izquierda)
 #define BUTTON_RIGHT 35 // GPIO35 (derecha)
-#define SENSOR_PIN 21   // GPIO21 (sensor de pulsos)
+#define SENSOR_PIN 21   // GPIO21 (sensor de pulsos) - Cable VERDE
 
 // --- Sensor de presión I2C Configuration ---
-#define I2C_SDA 32      // GPIO32 para SDA (corregido para evitar conflicto)
-#define I2C_SCL 22      // GPIO22 para SCL
+#define I2C_SDA 32      // GPIO32 para SDA - Cable AZUL ↔ Cable BLANCO sonda
+#define I2C_SCL 22      // GPIO22 para SCL - Cable VERDE ↔ Cable AMARILLO sonda
 #define WNK1MA_ADDR 0x6D
 #define WNK1MA_CMD 0x06
 
@@ -46,7 +47,7 @@ float pulse_frequency = 0.0;
 // Variables para el gráfico
 float graph_data[GRAPH_WIDTH];
 int graph_index = 0;
-float max_freq_scale = 120.0; // Escala fija del gráfico para cubrir hasta 100Hz (STRESS_BURST)
+float max_freq_scale = 100.0; // Escala fija del gráfico para cubrir hasta 80Hz (STRESS_BURST), mejor visibilidad para bajas frecuencias
 
 // Variables para el sistema de modos
 enum SystemMode {
@@ -67,9 +68,9 @@ bool pulse_state = false;
 
 // Variables para el patrón sofisticado (29 segundos)
 enum PatternPhase {
-  PHASE_BURST1,       // 3s con gradientes 30Hz→50Hz→30Hz
+  PHASE_BURST1,       // 3s con gradientes 1Hz→5Hz→1Hz (test baja frecuencia)
   PHASE_PAUSE1,       // 3s parado
-  PHASE_BURST2,       // 3s con gradientes 30Hz→50Hz→30Hz  
+  PHASE_BURST2,       // 3s con gradientes 30Hz→50Hz→30Hz (frecuencias originales)
   PHASE_PAUSE2,       // 3s parado
   PHASE_STRESS_BURST, // 10s test de carga múltiples frecuencias
   PHASE_PAUSE3        // 7s parado
@@ -108,6 +109,9 @@ float pressure_graph_data[GRAPH_WIDTH];
 int pressure_graph_index = 0;
 float pressure_min_scale = 0.0;
 float pressure_max_scale = 100.0;
+float pressure_historical_min = FLT_MAX;  // Mínimo histórico desde inicio
+float pressure_historical_max = FLT_MIN;  // Máximo histórico desde inicio
+bool pressure_history_initialized = false; // Flag para primer valor
 unsigned long last_pressure_read = 0;
 const unsigned long PRESSURE_READ_INTERVAL = 10; // 100Hz = cada 10ms
 bool pressure_auto_scale = true;
@@ -115,6 +119,7 @@ bool pressure_auto_scale = true;
 // Declaraciones forward
 void enterSleepMode();
 float getBurstFrequency(unsigned long phase_elapsed);
+float getBurst2Frequency(unsigned long phase_elapsed);
 float getStressFrequency(unsigned long stress_elapsed);
 
 // Función de interrupción para contar pulsos
@@ -159,7 +164,15 @@ void updateUserActivity() {
   last_user_activity_time = millis();
 }
 
-// Función genérica para actualizar cualquier gráfico
+// Función para dibujar líneas de referencia (solo cuando cambia la escala)
+void dibujarLineasReferencia() {
+  // Dibujar líneas de referencia horizontales
+  tft.drawLine(GRAPH_X, GRAPH_Y + GRAPH_HEIGHT/2, GRAPH_X + GRAPH_WIDTH, GRAPH_Y + GRAPH_HEIGHT/2, TFT_DARKGREY);
+  tft.drawLine(GRAPH_X, GRAPH_Y + GRAPH_HEIGHT/4, GRAPH_X + GRAPH_WIDTH, GRAPH_Y + GRAPH_HEIGHT/4, TFT_DARKGREY);
+  tft.drawLine(GRAPH_X, GRAPH_Y + 3*GRAPH_HEIGHT/4, GRAPH_X + GRAPH_WIDTH, GRAPH_Y + 3*GRAPH_HEIGHT/4, TFT_DARKGREY);
+}
+
+// Función genérica para actualizar cualquier gráfico (OPTIMIZADA - líneas de referencia inteligentes)
 void actualizarGraficoGenerico(float* data, int* index, float nuevo_valor, 
                                 float min_scale, float max_scale, 
                                 uint16_t color_fill, uint16_t color_line,
@@ -167,83 +180,13 @@ void actualizarGraficoGenerico(float* data, int* index, float nuevo_valor,
   // Añadir nuevo punto
   data[*index] = nuevo_valor;
   
-  // Si hay auto-escalado, calcular nuevos límites
-  float scale_min = min_scale;
-  float scale_max = max_scale;
-  
-  if (auto_scale) {
-    float min_val = nuevo_valor;
-    float max_val = nuevo_valor;
-    
-    // Encontrar min y max en toda la serie de datos
-    for (int i = 0; i < GRAPH_WIDTH; i++) {
-      if (data[i] != 0.0) { // Solo considerar valores válidos
-        min_val = min(min_val, data[i]);
-        max_val = max(max_val, data[i]);
-      }
-    }
-    
-    // Añadir un poco de margen (5%)
-    float range = max_val - min_val;
-    if (range > 0) {
-      scale_min = min_val - (range * 0.05);
-      scale_max = max_val + (range * 0.05);
-    } else {
-      // Si todos los valores son iguales, usar un rango por defecto
-      scale_min = min_val - 10.0;
-      scale_max = max_val + 10.0;
-    }
-    
-    // Actualizar escalas globales para presión
-    if (auto_scale) {
-      pressure_min_scale = scale_min;
-      pressure_max_scale = scale_max;
-    }
-  }
-  
-  // Limpiar área del gráfico
+  // Siempre limpiar área del gráfico (simplificado para mejor rendimiento)
   tft.fillRect(GRAPH_X, GRAPH_Y, GRAPH_WIDTH, GRAPH_HEIGHT, TFT_BLACK);
   
-  // Dibujar el relleno sólido debajo de la línea
-  for (int i = 0; i < GRAPH_WIDTH - 1; i++) {
-    int idx1 = (*index - GRAPH_WIDTH + i + GRAPH_WIDTH) % GRAPH_WIDTH;
-    int idx2 = (*index - GRAPH_WIDTH + i + 1 + GRAPH_WIDTH) % GRAPH_WIDTH;
-    
-    // Para gráficos con escala fija, no validar != 0.0
-    // Para gráficos con auto-escala (presión), validar != 0.0
-    bool valid_data = auto_scale ? (data[idx1] != 0.0 && data[idx2] != 0.0) : true;
-    
-    if (valid_data) {
-      float range = scale_max - scale_min;
-      int y1, y2;
-      
-      if (auto_scale) {
-        // Con escalado dinámico
-        y1 = GRAPH_Y + GRAPH_HEIGHT - ((data[idx1] - scale_min) * GRAPH_HEIGHT / range);
-        y2 = GRAPH_Y + GRAPH_HEIGHT - ((data[idx2] - scale_min) * GRAPH_HEIGHT / range);
-      } else {
-        // Con escala fija (de 0 a max_scale)
-        y1 = GRAPH_Y + GRAPH_HEIGHT - (data[idx1] * GRAPH_HEIGHT / scale_max);
-        y2 = GRAPH_Y + GRAPH_HEIGHT - (data[idx2] * GRAPH_HEIGHT / scale_max);
-      }
-      
-      // Limitar valores dentro del gráfico
-      y1 = constrain(y1, GRAPH_Y, GRAPH_Y + GRAPH_HEIGHT);
-      y2 = constrain(y2, GRAPH_Y, GRAPH_Y + GRAPH_HEIGHT);
-      
-      // Dibujar línea vertical del relleno desde el fondo hasta la línea
-      int x_pos = GRAPH_X + i;
-      int y_start = GRAPH_Y + GRAPH_HEIGHT; // Fondo del gráfico
-      int y_fill = min(y1, y2); // Altura del relleno
-      
-      // Relleno sólido en color más tenue
-      if (y_fill < y_start) {
-        tft.drawFastVLine(x_pos, y_fill, y_start - y_fill, color_fill);
-      }
-    }
-  }
+  // Dibujar líneas de referencia (solo 3 líneas, muy eficiente)
+  dibujarLineasReferencia();
   
-  // Dibujar la línea del gráfico encima del relleno
+  // Dibujar SOLO la línea del gráfico
   for (int i = 1; i < GRAPH_WIDTH; i++) {
     int idx1 = (*index - GRAPH_WIDTH + i + GRAPH_WIDTH) % GRAPH_WIDTH;
     int idx2 = (*index - GRAPH_WIDTH + i + 1 + GRAPH_WIDTH) % GRAPH_WIDTH;
@@ -251,37 +194,65 @@ void actualizarGraficoGenerico(float* data, int* index, float nuevo_valor,
     bool valid_data = auto_scale ? (data[idx1] != 0.0 && data[idx2] != 0.0) : true;
     
     if (valid_data) {
-      float range = scale_max - scale_min;
       int y1, y2;
       
       if (auto_scale) {
-        y1 = GRAPH_Y + GRAPH_HEIGHT - ((data[idx1] - scale_min) * GRAPH_HEIGHT / range);
-        y2 = GRAPH_Y + GRAPH_HEIGHT - ((data[idx2] - scale_min) * GRAPH_HEIGHT / range);
+        float range = max_scale - min_scale;
+        y1 = GRAPH_Y + GRAPH_HEIGHT - ((data[idx1] - min_scale) * GRAPH_HEIGHT / range);
+        y2 = GRAPH_Y + GRAPH_HEIGHT - ((data[idx2] - min_scale) * GRAPH_HEIGHT / range);
       } else {
-        y1 = GRAPH_Y + GRAPH_HEIGHT - (data[idx1] * GRAPH_HEIGHT / scale_max);
-        y2 = GRAPH_Y + GRAPH_HEIGHT - (data[idx2] * GRAPH_HEIGHT / scale_max);
+        y1 = GRAPH_Y + GRAPH_HEIGHT - (data[idx1] * GRAPH_HEIGHT / max_scale);
+        y2 = GRAPH_Y + GRAPH_HEIGHT - (data[idx2] * GRAPH_HEIGHT / max_scale);
       }
       
       // Limitar valores dentro del gráfico
       y1 = constrain(y1, GRAPH_Y, GRAPH_Y + GRAPH_HEIGHT);
       y2 = constrain(y2, GRAPH_Y, GRAPH_Y + GRAPH_HEIGHT);
       
-      // Dibujar línea del gráfico
+      // Dibujar línea del gráfico (línea doble para mejor visibilidad)
       tft.drawLine(GRAPH_X + i - 1, y1, GRAPH_X + i, y2, color_line);
+      tft.drawLine(GRAPH_X + i - 1, y1 + 1, GRAPH_X + i, y2 + 1, color_line);
     }
   }
-  
-  // Dibujar líneas de referencia encima del gráfico
-  tft.drawLine(GRAPH_X, GRAPH_Y + GRAPH_HEIGHT/2, GRAPH_X + GRAPH_WIDTH, GRAPH_Y + GRAPH_HEIGHT/2, TFT_DARKGREY);
-  tft.drawLine(GRAPH_X, GRAPH_Y + GRAPH_HEIGHT/4, GRAPH_X + GRAPH_WIDTH, GRAPH_Y + GRAPH_HEIGHT/4, TFT_DARKGREY);
-  tft.drawLine(GRAPH_X, GRAPH_Y + 3*GRAPH_HEIGHT/4, GRAPH_X + GRAPH_WIDTH, GRAPH_Y + 3*GRAPH_HEIGHT/4, TFT_DARKGREY);
   
   // Avanzar índice
   *index = (*index + 1) % GRAPH_WIDTH;
 }
 
-// Función para actualizar el gráfico de presión con escalado dinámico
+// Función para actualizar histórico de presión y calcular escala
+void actualizarHistoricoPresion(float nuevo_valor) {
+  // Actualizar valores históricos
+  if (!pressure_history_initialized) {
+    pressure_historical_min = nuevo_valor;
+    pressure_historical_max = nuevo_valor;
+    pressure_history_initialized = true;
+  } else {
+    if (nuevo_valor < pressure_historical_min) {
+      pressure_historical_min = nuevo_valor;
+    }
+    if (nuevo_valor > pressure_historical_max) {
+      pressure_historical_max = nuevo_valor;
+    }
+  }
+  
+  // Calcular nueva escala con margen del 5%
+  float range = pressure_historical_max - pressure_historical_min;
+  if (range > 0) {
+    pressure_min_scale = pressure_historical_min - (range * 0.05);
+    pressure_max_scale = pressure_historical_max + (range * 0.05);
+  } else {
+    // Si todos los valores son iguales, usar rango por defecto
+    pressure_min_scale = pressure_historical_min - 10.0;
+    pressure_max_scale = pressure_historical_max + 10.0;
+  }
+}
+
+// Función para actualizar el gráfico de presión con escala histórica
 void actualizarGraficoPresion(float nuevo_valor) {
+  // Primero actualizar el histórico y recalcular escala
+  actualizarHistoricoPresion(nuevo_valor);
+  
+  // Luego actualizar el gráfico con la nueva escala
   actualizarGraficoGenerico(pressure_graph_data, &pressure_graph_index, nuevo_valor,
                             pressure_min_scale, pressure_max_scale,
                             TFT_BLUE, TFT_MAGENTA, pressure_auto_scale);
@@ -384,14 +355,23 @@ void inicializarGenerador() {
   
   // VERIFICACIÓN INICIAL: Mostrar algunas frecuencias de muestra
   Serial.println("\n=== VERIFICACIÓN DE FRECUENCIAS ===");
-  Serial.println("BURST gradientes (muestras):");
-  Serial.print("  0ms: "); Serial.print(getBurstFrequency(0), 2); Serial.println("Hz");
-  Serial.print("  250ms: "); Serial.print(getBurstFrequency(250), 2); Serial.println("Hz");
-  Serial.print("  500ms: "); Serial.print(getBurstFrequency(500), 2); Serial.println("Hz");
-  Serial.print("  1500ms: "); Serial.print(getBurstFrequency(1500), 2); Serial.println("Hz");
-  Serial.print("  2500ms: "); Serial.print(getBurstFrequency(2500), 2); Serial.println("Hz");
-  Serial.print("  2750ms: "); Serial.print(getBurstFrequency(2750), 2); Serial.println("Hz");
-  Serial.print("  3000ms: "); Serial.print(getBurstFrequency(3000), 2); Serial.println("Hz");
+  Serial.println("BURST1 - Bajas frecuencias (muestras):");
+  Serial.print("  0ms: "); Serial.print(getBurstFrequency(0), 2); Serial.println("Hz (inicio: 1Hz)");
+  Serial.print("  500ms: "); Serial.print(getBurstFrequency(500), 2); Serial.println("Hz (subida)");
+  Serial.print("  1000ms: "); Serial.print(getBurstFrequency(1000), 2); Serial.println("Hz (pico: 5Hz)");
+  Serial.print("  1500ms: "); Serial.print(getBurstFrequency(1500), 2); Serial.println("Hz (mantiene)");
+  Serial.print("  2000ms: "); Serial.print(getBurstFrequency(2000), 2); Serial.println("Hz (inicio bajada)");
+  Serial.print("  2500ms: "); Serial.print(getBurstFrequency(2500), 2); Serial.println("Hz (bajando)");
+  Serial.print("  3000ms: "); Serial.print(getBurstFrequency(3000), 2); Serial.println("Hz (final: 1Hz)");
+  
+  Serial.println("BURST2 - Frecuencias originales (muestras):");
+  Serial.print("  0ms: "); Serial.print(getBurst2Frequency(0), 2); Serial.println("Hz (inicio: 30Hz)");
+  Serial.print("  250ms: "); Serial.print(getBurst2Frequency(250), 2); Serial.println("Hz (subida)");
+  Serial.print("  500ms: "); Serial.print(getBurst2Frequency(500), 2); Serial.println("Hz (pico: 50Hz)");
+  Serial.print("  1500ms: "); Serial.print(getBurst2Frequency(1500), 2); Serial.println("Hz (mantiene)");
+  Serial.print("  2500ms: "); Serial.print(getBurst2Frequency(2500), 2); Serial.println("Hz (inicio bajada)");
+  Serial.print("  2750ms: "); Serial.print(getBurst2Frequency(2750), 2); Serial.println("Hz (bajando)");
+  Serial.print("  3000ms: "); Serial.print(getBurst2Frequency(3000), 2); Serial.println("Hz (final: 30Hz)");
   
   Serial.println("STRESS_BURST (muestras):");
   Serial.print("  0ms: "); Serial.print(getStressFrequency(0), 2); Serial.println("Hz");
@@ -405,6 +385,21 @@ void inicializarGenerador() {
 
 // Función para calcular frecuencia con gradiente en BURST (3s)
 float getBurstFrequency(unsigned long phase_elapsed) {
+  if (phase_elapsed < 1000) {
+    // Gradiente arranque lento: 1Hz → 5Hz en 1000ms (1 segundo)
+    return 1.0 + (4.0 * phase_elapsed / 1000.0);
+  } else if (phase_elapsed > 2000) {
+    // Gradiente parada lento: 5Hz → 1Hz en 1000ms finales
+    unsigned long remaining = 3000 - phase_elapsed;
+    return 1.0 + (4.0 * remaining / 1000.0);
+  } else {
+    // Frecuencia pico: 5Hz estable por 1 segundo
+    return 5.0;
+  }
+}
+
+// Función para calcular frecuencia con gradiente en BURST2 (3s) - Frecuencias originales
+float getBurst2Frequency(unsigned long phase_elapsed) {
   if (phase_elapsed < 500) {
     // Gradiente arranque: 30Hz → 50Hz en 500ms
     return 30.0 + (20.0 * phase_elapsed / 500.0);
@@ -474,8 +469,10 @@ void generarPulsos() {
   float target_freq = 0.0;
   switch(current_phase) {
     case PHASE_BURST1:
+      target_freq = getBurstFrequency(phase_elapsed);  // 1Hz→5Hz→1Hz
+      break;
     case PHASE_BURST2:
-      target_freq = getBurstFrequency(phase_elapsed);
+      target_freq = getBurst2Frequency(phase_elapsed); // 30Hz→50Hz→30Hz
       break;
     case PHASE_STRESS_BURST:
       target_freq = getStressFrequency(phase_elapsed);
@@ -808,9 +805,9 @@ void dibujarMarcoGrafico(bool es_presion) {
   tft.setTextFont(1);
   
   if (es_presion) {
-    // Etiquetas de escala para presión (dinámicas)
-    tft.drawString("AUTO", GRAPH_X - 15, GRAPH_Y - 2);
-    tft.drawString("PRES", GRAPH_X - 15, GRAPH_Y + GRAPH_HEIGHT - 2);
+    // Etiquetas de escala para presión (escalado histórico)
+    tft.drawString("HIST", GRAPH_X - 18, GRAPH_Y - 2);
+    tft.drawString("MAX", GRAPH_X - 15, GRAPH_Y + GRAPH_HEIGHT - 2);
   } else {
     // Etiquetas de escala para pulsos (120Hz fijo)
     tft.drawString("120", GRAPH_X - 18, GRAPH_Y - 2);        // Máximo (120 Hz)
@@ -961,7 +958,7 @@ void mostrarInfoSensor() {
     
     if (current_pressure != last_pressure_value) {
       char pressure_text[30];
-      snprintf(pressure_text, sizeof(pressure_text), "Presion: %d", (int)current_pressure);
+      snprintf(pressure_text, sizeof(pressure_text), "Presion: %.0f", current_pressure);
       tft.fillRect(5, 5, 160, 15, TFT_BLACK);
       tft.setTextColor(TFT_MAGENTA);
       tft.setTextSize(1);
@@ -970,20 +967,20 @@ void mostrarInfoSensor() {
       last_pressure_value = current_pressure;
     }
     
-    // Mostrar rango de escala
+    // Mostrar rango de escala histórico
     char range_text[40];
-    snprintf(range_text, sizeof(range_text), "Rango: %d-%d", (int)pressure_min_scale, (int)pressure_max_scale);
+    snprintf(range_text, sizeof(range_text), "Min:%.0f Max:%.0f", pressure_historical_min, pressure_historical_max);
     if (strcmp(range_text, last_total_text) != 0) {
-      tft.fillRect(5, 25, 160, 15, TFT_BLACK);
+      tft.fillRect(5, 25, 200, 15, TFT_BLACK); // Área más ancha para el texto
       tft.setTextColor(TFT_CYAN);
       tft.setTextSize(1);
-      tft.setTextFont(2);
+      tft.setTextFont(1); // Fuente más pequeña para que quepa
       tft.drawString(range_text, 5, 25);
       strcpy(last_total_text, range_text);
     }
     
-    // Mostrar información del modo
-    const char* mode_text = "Sensor I2C @ 100Hz";
+    // Mostrar información del modo con histórico
+    const char* mode_text = "Sensor I2C @ 100Hz (Historico)";
     if (strcmp(mode_text, last_phase_text) != 0) {
       tft.fillRect(5, 40, 230, 10, TFT_BLACK);
       tft.setTextColor(TFT_DARKGREY);
@@ -993,10 +990,10 @@ void mostrarInfoSensor() {
       strcpy(last_phase_text, mode_text);
     }
     
-    // Mostrar escalado automático
-    const char* scale_text = "Escala: AUTO";
+    // Mostrar escalado histórico
+    const char* scale_text = "Escala: HISTORICA";
     if (strcmp(scale_text, last_scale_text) != 0) {
-      tft.fillRect(5, 52, 100, 8, TFT_BLACK);
+      tft.fillRect(5, 52, 120, 8, TFT_BLACK);
       tft.setTextColor(TFT_DARKGREY);
       tft.setTextSize(1);
       tft.setTextFont(1);
@@ -1116,11 +1113,15 @@ void cambiarModo(SystemMode nuevo_modo) {
       // Restaurar pin del sensor
       pinMode(SENSOR_PIN, INPUT);
       digitalWrite(SENSOR_PIN, LOW);
+      // Resetear histórico de presión al cambiar a este modo
+      pressure_history_initialized = false;
+      pressure_historical_min = FLT_MAX;
+      pressure_historical_max = FLT_MIN;
       // Limpiar pantalla para mostrar gráfico de presión
       tft.fillScreen(TFT_BLACK);
       inicializarGrafico();
       mostrarModo();
-      Serial.println("Cambiado a MODO PRESION");
+      Serial.println("Cambiado a MODO PRESION - Histórico reseteado");
       break;
       
     case MODE_WIFI_SCAN:

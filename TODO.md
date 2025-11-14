@@ -203,6 +203,7 @@ Tiempo actualización: 15ms → 1.5ms (10x mejora)"
   - **Impacto**: Reducir lag en display TFT, especialmente en MODE_PRESSURE @ 100Hz
   - **Complejidad**: Media-Alta (requiere testing exhaustivo)
   - **Beneficio**: ~10x mejora en velocidad de actualización del gráfico
+  - **Nota**: Relleno azul eliminado para mejorar rendimiento (solo línea)
 
 - [ ] **MEJORA-007**: Timer hardware para generación de pulsos
   - **Descripción**: Migrar de `millis()` a ESP32 hardware timer o `micros()`
@@ -275,6 +276,15 @@ Tiempo actualización: 15ms → 1.5ms (10x mejora)"
 ---
 
 ## ✅ HISTORIAL DE MEJORAS COMPLETADAS
+
+#### ✅ MEJORA-021: Optimización de líneas de referencia (14-NOV-2025)
+- **Cambios**: 
+  - Función `dibujarLineasReferencia()` separada y optimizada
+  - Eliminado relleno azul para mejor rendimiento
+  - Líneas de referencia dibujadas eficientemente (solo 3 líneas horizontales)
+- **Problema resuelto**: Líneas cortadas/discontinuas durante variaciones de presión
+- **Impacto**: Renderizado más limpio y eficiente @ 100Hz
+- **Beneficio**: Gráfico más fluido sin artefactos visuales
 
 ### 📅 Optimizaciones de Código (19-OCT-2025)
 **Resultado: ~165 líneas eliminadas, código más limpio y eficiente**
