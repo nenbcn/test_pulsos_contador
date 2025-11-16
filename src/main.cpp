@@ -28,9 +28,9 @@
 
 // --- Constantes del Gráfico ---
 #define GRAPH_WIDTH 200
-#define GRAPH_HEIGHT 60
+#define GRAPH_HEIGHT 75
 #define GRAPH_X 20
-#define GRAPH_Y 60
+#define GRAPH_Y 45
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -967,26 +967,14 @@ void mostrarInfoSensor() {
       last_pressure_value = current_pressure;
     }
     
-    // Mostrar rango de escala histórico
-    char range_text[40];
-    snprintf(range_text, sizeof(range_text), "Min:%.0f Max:%.0f", pressure_historical_min, pressure_historical_max);
-    if (strcmp(range_text, last_total_text) != 0) {
-      tft.fillRect(5, 25, 200, 15, TFT_BLACK); // Área más ancha para el texto
-      tft.setTextColor(TFT_CYAN);
-      tft.setTextSize(1);
-      tft.setTextFont(1); // Fuente más pequeña para que quepa
-      tft.drawString(range_text, 5, 25);
-      strcpy(last_total_text, range_text);
-    }
-    
     // Mostrar información del modo con histórico
     const char* mode_text = "Sensor I2C @ 100Hz (Historico)";
     if (strcmp(mode_text, last_phase_text) != 0) {
-      tft.fillRect(5, 40, 230, 10, TFT_BLACK);
+      tft.fillRect(5, 25, 230, 10, TFT_BLACK);
       tft.setTextColor(TFT_DARKGREY);
       tft.setTextSize(1);
       tft.setTextFont(1);
-      tft.drawString(mode_text, 5, 40);
+      tft.drawString(mode_text, 5, 25);
       strcpy(last_phase_text, mode_text);
     }
     
