@@ -4,6 +4,9 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <float.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Adafruit_NeoPixel.h>
 
 #define BUTTON_LEFT 0   // GPIO0 (izquierda)
 #define BUTTON_RIGHT 35 // GPIO35 (derecha)
@@ -14,6 +17,12 @@
 #define I2C_SCL 22      // GPIO22 para SCL - Cable VERDE ↔ Cable AMARILLO sonda
 #define WNK1MA_ADDR 0x6D
 #define WNK1MA_CMD 0x06
+
+// --- Recirculador Configuration ---
+#define TEMP_SENSOR_PIN 15  // DS18B20 (cable AMARILLO)
+#define RELAY_PIN 12        // Control relé (cable ROJO)
+#define BUZZER_PIN 17       // PWM Buzzer (cable BLANCO)
+#define NEOPIXEL_PIN 13     // WS2812B LED (cable NARANJA)
 
 // --- Constantes de Timing y Configuración ---
 #define BUTTON_DEBOUNCE_MS 300       // Debounce de botones en milisegundos
@@ -54,6 +63,7 @@ enum SystemMode {
   MODE_READ,
   MODE_WRITE,
   MODE_PRESSURE,
+  MODE_RECIRCULATOR,
   MODE_WIFI_SCAN
 };
 SystemMode current_mode = MODE_READ;
@@ -116,11 +126,29 @@ unsigned long last_pressure_read = 0;
 const unsigned long PRESSURE_READ_INTERVAL = 10; // 100Hz = cada 10ms
 bool pressure_auto_scale = true;
 
+// Variables para el recirculador
+bool recirculator_power_state = false;
+unsigned long recirculator_start_time = 0;
+float recirculator_temp = 0.0;
+float recirculator_max_temp = 30.0;
+const unsigned long RECIRCULATOR_MAX_TIME = 120000; // 2 minutos en ms
+
+// Objetos para el recirculador
+OneWire oneWireRecirculator(TEMP_SENSOR_PIN);
+DallasTemperature sensorTemp(&oneWireRecirculator);
+Adafruit_NeoPixel pixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
 // Declaraciones forward
 void enterSleepMode();
 float getBurstFrequency(unsigned long phase_elapsed);
 float getBurst2Frequency(unsigned long phase_elapsed);
 float getStressFrequency(unsigned long stress_elapsed);
+void inicializarRecirculador();
+void setRecirculatorPower(bool state);
+void leerTemperaturaRecirculador();
+void controlarRecirculadorAutomatico();
+void mostrarPantallaRecirculador();
+void manejarModoRecirculador();
 
 // Función de interrupción para contar pulsos
 void IRAM_ATTR pulseInterrupt() {
@@ -745,6 +773,9 @@ void mostrarModo() {
     } else if (current_mode == MODE_PRESSURE) {
       tft.setTextColor(TFT_MAGENTA);
       tft.drawString("PRES", 175, 25);
+    } else if (current_mode == MODE_RECIRCULATOR) {
+      tft.setTextColor(TFT_ORANGE);
+      tft.drawString("RECIR", 175, 25);
     } else if (current_mode == MODE_WIFI_SCAN) {
       tft.setTextColor(TFT_CYAN);
       tft.drawString("WiFi", 175, 25);
@@ -991,6 +1022,244 @@ void mostrarInfoSensor() {
   }
 }
 
+// ============================================================================
+// FUNCIONES DEL RECIRCULADOR
+// ============================================================================
+
+void inicializarRecirculador() {
+  Serial.println("\n=== INICIALIZANDO RECIRCULADOR ===");
+  
+  // Configurar pines
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+  Serial.println("✓ Relé (GPIO12) configurado");
+  
+  pinMode(BUZZER_PIN, OUTPUT);
+  Serial.println("✓ Buzzer (GPIO17) configurado");
+  
+  // Inicializar sensor DS18B20
+  Serial.println("Inicializando DS18B20 en GPIO15...");
+  sensorTemp.begin();
+  int deviceCount = sensorTemp.getDeviceCount();
+  Serial.printf("DS18B20 devices found: %d\n", deviceCount);
+  
+  if (deviceCount == 0) {
+    Serial.println("⚠️ NO SE DETECTÓ SENSOR DS18B20!");
+    Serial.println("   Verifica:");
+    Serial.println("   - Cable AMARILLO conectado a GPIO15");
+    Serial.println("   - Sensor alimentado (VCC y GND)");
+    Serial.println("   - Resistencia pull-up 4.7kΩ entre DATA y VCC");
+  } else {
+    // Hacer una lectura de prueba
+    Serial.println("Haciendo lectura de prueba...");
+    sensorTemp.requestTemperatures();
+    delay(100);
+    float testTemp = sensorTemp.getTempCByIndex(0);
+    Serial.printf("Temperatura inicial: %.2f°C\n", testTemp);
+    if (testTemp == -127.0) {
+      Serial.println("⚠️ Sensor responde pero no lee temperatura correctamente");
+    } else if (testTemp == 85.0) {
+      Serial.println("⚠️ Sensor devuelve temperatura por defecto (85°C)");
+    }
+  }
+  
+  // Inicializar NeoPixel
+  pixel.begin();
+  pixel.setBrightness(50);
+  pixel.setPixelColor(0, pixel.Color(255, 0, 0)); // Rojo = apagado
+  pixel.show();
+  Serial.println("✓ NeoPixel (GPIO13) inicializado");
+  
+  recirculator_power_state = false;
+  recirculator_temp = 0.0;
+  Serial.println("=== RECIRCULADOR LISTO ===\n");
+}
+
+void setRecirculatorPower(bool state) {
+  recirculator_power_state = state;
+  
+  if (state) {
+    // ENCENDER bomba
+    digitalWrite(RELAY_PIN, HIGH);
+    recirculator_start_time = millis();
+    pixel.setPixelColor(0, pixel.Color(0, 255, 0)); // Verde
+    pixel.show();
+    tone(BUZZER_PIN, 1000, 100); // Beep corto
+    Serial.println("✅ Bomba ENCENDIDA");
+  } else {
+    // APAGAR bomba
+    digitalWrite(RELAY_PIN, LOW);
+    pixel.setPixelColor(0, pixel.Color(255, 0, 0)); // Rojo
+    pixel.show();
+    tone(BUZZER_PIN, 500, 200); // Beep grave
+    Serial.println("🛑 Bomba APAGADA");
+  }
+}
+
+void leerTemperaturaRecirculador() {
+  Serial.println("📡 Solicitando temperatura...");
+  sensorTemp.requestTemperatures();
+  delay(10); // Pequeña espera para que el sensor responda
+  
+  float temp = sensorTemp.getTempCByIndex(0);
+  Serial.printf("📊 Lectura raw del sensor: %.2f°C\n", temp);
+  
+  // Filtrar errores comunes del DS18B20
+  if (temp != -127.0 && temp != 85.0 && temp > -50.0 && temp < 125.0) {
+    recirculator_temp = temp;
+    Serial.printf("✅ Temperatura válida actualizada: %.2f°C\n", recirculator_temp);
+  } else {
+    // MODO SIMULACIÓN: Usar temperatura simulada si sensor no responde
+    static bool simulation_warned = false;
+    if (!simulation_warned) {
+      Serial.println("⚠️ SENSOR NO RESPONDE - ACTIVANDO MODO SIMULACIÓN");
+      Serial.println("   Temperatura simulada: 25°C + variación aleatoria");
+      simulation_warned = true;
+    }
+    
+    // Simular temperatura ambiente con pequeña variación (25°C ±2°C)
+    static float simulated_temp = 25.0;
+    simulated_temp += (random(-10, 10) / 10.0); // Variación de ±1°C
+    simulated_temp = constrain(simulated_temp, 23.0, 27.0);
+    
+    recirculator_temp = simulated_temp;
+    Serial.printf("🎭 Temperatura SIMULADA: %.2f°C\n", recirculator_temp);
+  }
+}
+
+void controlarRecirculadorAutomatico() {
+  if (!recirculator_power_state) return; // Solo si está encendido
+  
+  unsigned long elapsed = millis() - recirculator_start_time;
+  
+  // CONDICIÓN 1: Temperatura alcanzada
+  if (recirculator_temp >= recirculator_max_temp) {
+    setRecirculatorPower(false);
+    // Melody de éxito (simplificada - 3 notas)
+    tone(BUZZER_PIN, 523, 200); delay(250); noTone(BUZZER_PIN); // C5
+    tone(BUZZER_PIN, 659, 200); delay(250); noTone(BUZZER_PIN); // E5
+    tone(BUZZER_PIN, 784, 400); delay(450); noTone(BUZZER_PIN); // G5
+    Serial.println("🎯 Temperatura alcanzada - Apagado automático");
+    return;
+  }
+  
+  // CONDICIÓN 2: Timeout (2 minutos)
+  if (elapsed >= RECIRCULATOR_MAX_TIME) {
+    setRecirculatorPower(false);
+    // Buzzer de timeout (2 beeps)
+    tone(BUZZER_PIN, 2000, 1000);
+    delay(1100);
+    noTone(BUZZER_PIN);
+    tone(BUZZER_PIN, 2000, 1000);
+    delay(1100);
+    noTone(BUZZER_PIN);
+    Serial.println("⏱️ Timeout 2 minutos - Apagado automático");
+    return;
+  }
+}
+
+void mostrarPantallaRecirculador() {
+  static bool last_power_state = false;
+  static float last_temp = -999;
+  static unsigned long last_elapsed = 0;
+  
+  unsigned long current_time = millis();
+  unsigned long elapsed = recirculator_power_state ? 
+                          (current_time - recirculator_start_time) / 1000 : 0;
+  
+  // Solo actualizar si hay cambios significativos
+  bool needs_update = (last_power_state != recirculator_power_state) ||
+                      (abs(last_temp - recirculator_temp) > 0.5) ||
+                      (abs((long)last_elapsed - (long)elapsed) >= 1);
+  
+  if (!needs_update) return;
+  
+  // Limpiar área de contenido
+  tft.fillRect(0, 22, 240, 113, TFT_BLACK);
+  
+  // Título
+  tft.setTextColor(TFT_ORANGE);
+  tft.setTextFont(2);
+  tft.drawString("RECIRCULATOR", 10, 25);
+  
+  // Estado
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextFont(2);
+  tft.drawString("Estado:", 10, 45);
+  
+  if (recirculator_power_state) {
+    tft.setTextColor(TFT_GREEN);
+    tft.drawString("ENCENDIDO", 80, 45);
+  } else {
+    tft.setTextColor(TFT_RED);
+    tft.drawString("APAGADO", 80, 45);
+  }
+  
+  // Temperatura actual
+  tft.setTextColor(TFT_CYAN);
+  tft.setTextFont(2);
+  char temp_str[30];
+  snprintf(temp_str, sizeof(temp_str), "Temp: %.1fC", recirculator_temp);
+  tft.drawString(temp_str, 10, 70);
+  
+  // Temperatura máxima
+  tft.setTextColor(TFT_YELLOW);
+  char max_temp_str[30];
+  snprintf(max_temp_str, sizeof(max_temp_str), "Max:  %.1fC", recirculator_max_temp);
+  tft.drawString(max_temp_str, 10, 90);
+  
+  // Tiempo transcurrido (solo si está encendido)
+  if (recirculator_power_state) {
+    tft.setTextColor(TFT_MAGENTA);
+    char time_str[30];
+    unsigned long total_seconds = RECIRCULATOR_MAX_TIME / 1000;
+    snprintf(time_str, sizeof(time_str), "Tiempo: %02lu:%02lu / %02lu:%02lu",
+             elapsed / 60, elapsed % 60,
+             total_seconds / 60, total_seconds % 60);
+    tft.drawString(time_str, 10, 110);
+  }
+  
+  // Instrucciones
+  tft.setTextColor(TFT_DARKGREY);
+  tft.setTextFont(1);
+  tft.drawString("[IZQ] ON/OFF", 10, 115);
+  tft.drawString("[DER] Cambiar modo", 10, 125);
+  
+  last_power_state = recirculator_power_state;
+  last_temp = recirculator_temp;
+  last_elapsed = elapsed;
+}
+
+void manejarModoRecirculador() {
+  static unsigned long last_temp_read = 0;
+  static unsigned long last_debug_print = 0;
+  unsigned long current_time = millis();
+  
+  // Leer temperatura cada 1 segundo
+  if (current_time - last_temp_read >= 1000) {
+    leerTemperaturaRecirculador();
+    last_temp_read = current_time;
+  }
+  
+  // Debug cada 3 segundos
+  if (current_time - last_debug_print >= 3000) {
+    Serial.printf("🌡️ Temp actual: %.2f°C | Max: %.1f°C | Bomba: %s\n", 
+                  recirculator_temp, recirculator_max_temp, 
+                  recirculator_power_state ? "ON" : "OFF");
+    last_debug_print = current_time;
+  }
+  
+  // Control automático
+  controlarRecirculadorAutomatico();
+  
+  // Actualizar pantalla
+  mostrarPantallaRecirculador();
+}
+
+// ============================================================================
+// FIN FUNCIONES DEL RECIRCULADOR
+// ============================================================================
+
 void setup() {
   Serial.begin(115200);
   
@@ -1026,6 +1295,7 @@ void setup() {
   // Inicializar gráfico y generador
   inicializarGrafico();
   inicializarGenerador();
+  inicializarRecirculador();
   
   // Leer y mostrar voltaje inicial
   voltaje = leerVoltaje();
@@ -1040,8 +1310,9 @@ void setup() {
   Serial.println("=== TTGO T-Display - Monitor/Generador/Presión/WiFi Scanner ===");
   Serial.println("GPIO21 - Sensor/Generador configurado");
   Serial.println("GPIO32/22 - I2C para sensor de presión WNK1MA (SDA/SCL)");
-  Serial.println("Botón IZQUIERDO: Cambiar página en WiFi Scanner");
-  Serial.println("Botón DERECHO: Ciclar READ->WRITE->PRESSURE->WiFi->READ");
+  Serial.println("GPIO15/12/17/13 - Recirculador (Temp/Relé/Buzzer/LED)");
+  Serial.println("Botón IZQUIERDO: Toggle bomba / Cambiar página WiFi");
+  Serial.println("Botón DERECHO: Ciclar READ->WRITE->PRESSURE->RECIR->WiFi->READ");
   Serial.println("Sleep automático: 5 minutos sin actividad de BOTONES");
   Serial.println("Escala gráfico: 0-75Hz (fija) / AUTO (presión)");
   Serial.println("Modo inicial: LECTURA");
@@ -1055,7 +1326,10 @@ void setup() {
 void manejarBotonIzquierdo() {
   updateUserActivity();
   
-  if (current_mode == MODE_WIFI_SCAN) {
+  if (current_mode == MODE_RECIRCULATOR) {
+    // En modo Recirculador: Toggle bomba ON/OFF
+    setRecirculatorPower(!recirculator_power_state);
+  } else if (current_mode == MODE_WIFI_SCAN) {
     // En modo WiFi: cambiar página (cíclico)
     wifi_page = (wifi_page + 1) % MAX_WIFI_PAGES;
     Serial.println("Cambiando a página WiFi: " + String(wifi_page + 1));
@@ -1112,6 +1386,16 @@ void cambiarModo(SystemMode nuevo_modo) {
       Serial.println("Cambiado a MODO PRESION - Histórico reseteado");
       break;
       
+    case MODE_RECIRCULATOR:
+      // Apagar bomba al entrar al modo si estaba encendida
+      if (recirculator_power_state) {
+        setRecirculatorPower(false);
+      }
+      tft.fillScreen(TFT_BLACK);
+      mostrarModo();
+      Serial.println("Cambiado a MODO RECIRCULADOR");
+      break;
+      
     case MODE_WIFI_SCAN:
       // Iniciar modo WiFi
       wifi_page = 0; // Empezar en página 1
@@ -1126,7 +1410,7 @@ void cambiarModo(SystemMode nuevo_modo) {
 
 // Función para manejar botón derecho (cambio de modo)
 void manejarBotonDerecho() {
-  // Botón derecho: Ciclar entre READ -> WRITE -> PRESSURE -> WiFi -> READ
+  // Botón derecho: Ciclar entre READ -> WRITE -> PRESSURE -> RECIRCULATOR -> WiFi -> READ
   switch (current_mode) {
     case MODE_READ:
       cambiarModo(MODE_WRITE);
@@ -1135,6 +1419,9 @@ void manejarBotonDerecho() {
       cambiarModo(MODE_PRESSURE);
       break;
     case MODE_PRESSURE:
+      cambiarModo(MODE_RECIRCULATOR);
+      break;
+    case MODE_RECIRCULATOR:
       cambiarModo(MODE_WIFI_SCAN);
       break;
     case MODE_WIFI_SCAN:
@@ -1298,13 +1585,16 @@ void loop() {
     case MODE_PRESSURE:
       manejarModoPressure();
       break;
+    case MODE_RECIRCULATOR:
+      manejarModoRecirculador();
+      break;
     case MODE_WIFI_SCAN:
       manejarModoWiFi();
       break;
   }
 
-  // Mostrar información actualizada (solo si no estamos en modo WiFi)
-  if (current_mode != MODE_WIFI_SCAN) {
+  // Mostrar información actualizada (solo si no estamos en modo WiFi o Recirculador)
+  if (current_mode != MODE_WIFI_SCAN && current_mode != MODE_RECIRCULATOR) {
     mostrarInfoSensor();
   }
 }

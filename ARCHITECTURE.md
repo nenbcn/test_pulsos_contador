@@ -2,7 +2,7 @@
 
 ## 🏗️ Visión General
 
-Firmware para ESP32 TTGO T-Display con 4 modos de operación principales. Arquitectura **single-threaded** basada en Arduino framework (no usa FreeRTOS).
+Firmware para ESP32 TTGO T-Display con 5 modos de operación principales. Arquitectura **single-threaded** basada en Arduino framework (no usa FreeRTOS).
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -12,9 +12,10 @@ Firmware para ESP32 TTGO T-Display con 4 modos de operación principales. Arquit
            │
            ├─> Botones (debouncing)
            ├─> Modos (FSM)
-           ├─> Sensores (pulsos, presión, voltaje)
+           ├─> Sensores (pulsos, presión, voltaje, temperatura)
            ├─> Generador de pulsos
            ├─> WiFi Scanner
+           ├─> Recirculador (control bomba + sensor temperatura)
            └─> Display (TFT_eSPI)
 ```
 
@@ -26,10 +27,11 @@ Firmware para ESP32 TTGO T-Display con 4 modos de operación principales. Arquit
 
 ```cpp
 enum SystemMode {
-  MODE_READ,      // Lectura de pulsos + gráfico frecuencia
-  MODE_WRITE,     // Generación de pulsos (patrón sofisticado)
-  MODE_PRESSURE,  // Sensor I2C WNK1MA a 100Hz + gráfico
-  MODE_WIFI_SCAN  // Escaneo WiFi con paginación
+  MODE_READ,         // Lectura de pulsos + gráfico frecuencia
+  MODE_WRITE,        // Generación de pulsos (patrón sofisticado)
+  MODE_PRESSURE,     // Sensor I2C WNK1MA a 100Hz + gráfico
+  MODE_RECIRCULATOR, // Control bomba recirculación + sensor temperatura
+  MODE_WIFI_SCAN     // Escaneo WiFi con paginación
 };
 ```
 
@@ -38,14 +40,16 @@ enum SystemMode {
 ```
     [Botón Derecho]
          ↓
-MODE_READ ←→ MODE_WRITE ←→ MODE_PRESSURE ←→ MODE_WIFI_SCAN
-    ↑                                              ↓
-    └──────────────────────────────────────────────┘
+MODE_READ ←→ MODE_WRITE ←→ MODE_PRESSURE ←→ MODE_RECIRCULATOR ←→ MODE_WIFI_SCAN
+    ↑                                                                    ↓
+    └────────────────────────────────────────────────────────────────────┘
 ```
 
 **Control:**
 - **Botón Derecho (GPIO35)**: Cambiar modo (ciclo circular)
-- **Botón Izquierdo (GPIO0)**: Acción específica del modo (ej: cambiar página WiFi)
+- **Botón Izquierdo (GPIO0)**: Acción específica del modo
+  - `MODE_RECIRCULATOR`: Toggle bomba ON/OFF
+  - `MODE_WIFI_SCAN`: Cambiar página WiFi
 
 ---
 
@@ -74,6 +78,12 @@ int wifi_count, wifi_page;
 // Generador de pulsos (MODE_WRITE)
 PatternPhase current_phase;
 unsigned long phase_start_time;
+
+// Recirculador (MODE_RECIRCULATOR)
+bool recirculator_power_state;
+unsigned long recirculator_start_time;
+float recirculator_temp;
+float recirculator_max_temp;
 ```
 
 ### 2. Interrupciones (líneas 150-170)
@@ -86,6 +96,7 @@ void IRAM_ATTR wakeUpInterrupt()   // Wake-up desde sleep
 ```cpp
 WNK1MA_Reading readWNK1MA()        // I2C sensor presión
 float leerVoltaje()                // ADC voltaje batería
+void leerTemperaturaRecirculador() // DS18B20 OneWire temperatura
 ```
 
 ### 4. Funciones de Visualización (líneas 300-900)
@@ -96,6 +107,7 @@ void mostrarInfoSensor()           // UI MODE_READ
 void mostrarInfoGenerador()        // UI MODE_WRITE
 void mostrarInfoPresion()          // UI MODE_PRESSURE
 void mostrarWiFiScan()             // UI MODE_WIFI_SCAN
+void mostrarPantallaRecirculador() // UI MODE_RECIRCULATOR
 void mostrarVoltaje()              // Barra de voltaje
 ```
 
@@ -109,6 +121,11 @@ void generarPulsos()
 // WiFi
 void escanearWiFi()
 uint16_t getWiFiColor(int32_t rssi)
+
+// Recirculador (MODE_RECIRCULATOR)
+void inicializarRecirculador()
+void setRecirculatorPower(bool state)
+void controlarRecirculadorAutomatico()
 
 // Sleep
 void updateUserActivity()
@@ -160,6 +177,12 @@ void loop() {
       // Leer sensor I2C @ 100Hz
       // Auto-escalar gráfico
       // Mostrar UI
+      break;
+      
+    case MODE_RECIRCULATOR:
+      // Leer temperatura DS18B20 @ 1Hz
+      // Control automático bomba (temp/timeout)
+      // Mostrar UI + indicadores LED
       break;
       
     case MODE_WIFI_SCAN:
@@ -244,6 +267,10 @@ Ver `docs/pulse_implementation_guide.md` para detalles de implementación.
 | GPIO22 | I2C SCL | I2C | Sensor WNK1MA |
 | GPIO36 | Voltaje ADC | INPUT | Lectura batería |
 | GPIO4 | TFT Backlight | OUTPUT | Control brillo |
+| GPIO15 | Sensor Temperatura | INPUT | DS18B20 OneWire |
+| GPIO12 | Relé Bomba | OUTPUT | Control bomba |
+| GPIO17 | Buzzer | OUTPUT | PWM para tonos |
+| GPIO13 | NeoPixel LED | OUTPUT | Indicador visual |
 
 ### Interrupciones
 
@@ -276,6 +303,124 @@ WiFiNetwork wifi_networks[20];   // Máximo 20 redes
 
 **Paginación:** Mostrar 5 redes por página (3 páginas máximo).
 
+### Recirculador
+```cpp
+// Sin arrays grandes - solo variables de estado
+bool recirculator_power_state;
+float recirculator_temp;
+// + librerías OneWire, DallasTemperature, Adafruit_NeoPixel
+```
+
+---
+
+## 🌡️ MODE_RECIRCULATOR: Control de Bomba
+
+### Propósito
+Sistema de control para bomba de recirculación de agua caliente con:
+- Sensor de temperatura DS18B20 (OneWire)
+- Control de relé para bomba
+- Indicador LED NeoPixel de estado
+- Buzzer para feedback sonoro
+- Apagado automático por temperatura o timeout
+
+### Hardware Asignado
+```cpp
+#define TEMP_SENSOR_PIN 15   // DS18B20 (cable AMARILLO)
+#define RELAY_PIN 12         // Control relé (cable ROJO)
+#define BUZZER_PIN 17        // PWM Buzzer (cable BLANCO)
+#define NEOPIXEL_PIN 13      // WS2812B LED (cable NARANJA)
+```
+
+### Lógica de Control
+
+```cpp
+void controlarRecirculadorAutomatico() {
+  if (!recirculator_power_state) return;
+  
+  unsigned long elapsed = millis() - recirculator_start_time;
+  
+  // CONDICIÓN 1: Temperatura alcanzada
+  if (recirculator_temp >= recirculator_max_temp) {
+    setRecirculatorPower(false);
+    // Melody de éxito
+    tone(BUZZER_PIN, 523, 200); // C5
+    tone(BUZZER_PIN, 659, 200); // E5
+    tone(BUZZER_PIN, 784, 400); // G5
+    return;
+  }
+  
+  // CONDICIÓN 2: Timeout (2 minutos)
+  if (elapsed >= 120000) {
+    setRecirculatorPower(false);
+    // Buzzer de timeout (2 beeps)
+    tone(BUZZER_PIN, 2000, 1000); delay(1100);
+    tone(BUZZER_PIN, 2000, 1000);
+    return;
+  }
+}
+```
+
+### Estados del Sistema
+
+```
+┌─────────────┐  Botón IZQ / MQTT    ┌─────────────┐
+│   APAGADO   │ ──────────────────> │  ENCENDIDO  │
+│  LED: ROJO  │                      │ LED: VERDE  │
+│ Relé: LOW   │ <────────────────── │ Relé: HIGH  │
+└─────────────┘  Temp ≥ Max          └─────────────┘
+                 Timeout 2min
+                 Botón IZQ / MQTT
+```
+
+### Pantalla UI
+
+```
+┌────────────────────────────────────┐
+│ RECIRCULATOR        2.15V  [RECIR] │
+├────────────────────────────────────┤
+│  Estado: 🟢 ENCENDIDO               │
+│                                     │
+│  Temp: 28.5°C                      │
+│  Max:  30.0°C                      │
+│                                     │
+│  Tiempo: 00:45 / 02:00             │
+│                                     │
+│  [IZQ] ON/OFF                      │
+│  [DER] Cambiar modo                │
+└────────────────────────────────────┘
+```
+
+### Indicadores LED NeoPixel
+
+| Color | Estado | Significado |
+|-------|--------|-------------|
+| 🔴 ROJO | Apagado | Bomba inactiva |
+| 🟢 VERDE | Encendido | Bomba funcionando |
+
+### Feedback Sonoro
+
+| Evento | Patrón | Notas |
+|--------|--------|-------|
+| Encendido | 1 beep corto | 1000Hz, 100ms |
+| Apagado manual | 1 beep grave | 500Hz, 200ms |
+| Temp alcanzada | Melody (3 notas) | C5-E5-G5 |
+| Timeout | 2 beeps largos | 2000Hz, 1000ms × 2 |
+
+### Librerías Requeridas
+
+```cpp
+#include <OneWire.h>           // Protocolo 1-Wire para DS18B20
+#include <DallasTemperature.h>  // Driver DS18B20
+#include <Adafruit_NeoPixel.h>  // Control WS2812B LED
+```
+
+**Configuración:**
+```cpp
+OneWire oneWireRecirculator(TEMP_SENSOR_PIN);
+DallasTemperature sensorTemp(&oneWireRecirculator);
+Adafruit_NeoPixel pixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+```
+
 ---
 
 ## 🔋 Power Management
@@ -299,10 +444,11 @@ Usuario presiona botón → updateUserActivity() → Reset timer
 
 ### Colores por Modo
 ```cpp
-MODE_READ:      TFT_GREEN   (pulsos), TFT_CYAN (gráfico)
-MODE_WRITE:     TFT_RED     (generador)
-MODE_PRESSURE:  TFT_MAGENTA (presión)
-MODE_WIFI_SCAN: TFT_CYAN    (WiFi)
+MODE_READ:         TFT_GREEN   (pulsos), TFT_CYAN (gráfico)
+MODE_WRITE:        TFT_RED     (generador)
+MODE_PRESSURE:     TFT_MAGENTA (presión)
+MODE_WIFI_SCAN:    TFT_CYAN    (WiFi)
+MODE_RECIRCULATOR: TFT_ORANGE  (recirculador)
 ```
 
 ### Redibujado Optimizado
