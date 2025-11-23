@@ -24,6 +24,53 @@
 #define BUZZER_PIN 17       // PWM Buzzer (cable BLANCO)
 #define NEOPIXEL_PIN 13     // WS2812B LED (cable NARANJA)
 
+// --- Notas Musicales para Buzzer ---
+#define NOTE_C5  523
+#define NOTE_CS5 554
+#define NOTE_D5  587
+#define NOTE_DS5 622
+#define NOTE_E5  659
+#define NOTE_F5  698
+#define NOTE_FS5 740
+#define NOTE_G5  784
+#define NOTE_GS5 831
+#define NOTE_A5  880
+#define NOTE_AS5 932
+#define NOTE_B5  988
+#define NOTE_C6  1047
+#define NOTE_E6  1319
+#define NOTE_G6  1568
+#define NOTE_A6  1760
+#define NOTE_AS6 1865
+#define NOTE_B6  1976
+#define NOTE_C7  2093
+#define NOTE_E7  2637
+#define NOTE_G7  3136
+
+// Melodía Mario Bros (éxito)
+int mario_melody[] = {
+  NOTE_E7, NOTE_E7, 0, NOTE_E7, 0, NOTE_C7, NOTE_E7, 0, NOTE_G7, 0, 0, 0,
+  NOTE_G6, 0, 0, 0, NOTE_C7, 0, 0, NOTE_G6, 0, 0, NOTE_E6, 0, NOTE_A6, 0, NOTE_B6, 0, NOTE_AS6, NOTE_A6, 0
+};
+int mario_durations[] = {
+  125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125,
+  125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125, 125
+};
+int mario_num_notes = sizeof(mario_melody) / sizeof(mario_melody[0]);
+
+// Melodía Mario Bros Game Over (fracaso/timeout)
+int mario_gameover_melody[] = {
+  NOTE_C5, NOTE_G5, NOTE_E5,
+  NOTE_A5, NOTE_B5, NOTE_A5, NOTE_GS5, NOTE_AS5, NOTE_GS5,
+  NOTE_G5, NOTE_D5, NOTE_E5
+};
+int mario_gameover_durations[] = {
+  250, 250, 250,
+  250, 250, 250, 250, 250, 250,
+  250, 250, 500
+};
+int mario_gameover_num_notes = sizeof(mario_gameover_melody) / sizeof(mario_gameover_melody[0]);
+
 // --- Constantes de Timing y Configuración ---
 #define BUTTON_DEBOUNCE_MS 300       // Debounce de botones en milisegundos
 #define PULSE_CALC_INTERVAL_MS 200   // Intervalo para calcular frecuencia de pulsos
@@ -149,6 +196,21 @@ void leerTemperaturaRecirculador();
 void controlarRecirculadorAutomatico();
 void mostrarPantallaRecirculador();
 void manejarModoRecirculador();
+
+// Función helper para tocar tonos con máxima potencia
+void playTone(int frequency, int duration_ms) {
+  if (frequency > 0) {
+    ledcWriteTone(0, frequency);
+    ledcWrite(0, 512); // 50% duty cycle con 10 bits (1023/2) - máxima potencia audible
+  } else {
+    ledcWriteTone(0, 0);
+  }
+  delay(duration_ms);
+}
+
+void stopTone() {
+  ledcWriteTone(0, 0);
+}
 
 // Función de interrupción para contar pulsos
 void IRAM_ATTR pulseInterrupt() {
@@ -1035,7 +1097,21 @@ void inicializarRecirculador() {
   Serial.println("✓ Relé (GPIO12) configurado");
   
   pinMode(BUZZER_PIN, OUTPUT);
-  Serial.println("✓ Buzzer (GPIO17) configurado");
+  
+  // Configurar LEDC para el buzzer (necesario en ESP32)
+  // 10 bits = máximo duty cycle 1023 (más potencia que 8 bits)
+  ledcSetup(0, 5000, 10); // Canal 0, 5kHz, resolución 10 bits
+  ledcAttachPin(BUZZER_PIN, 0);
+  Serial.println("✓ Buzzer (GPIO17) configurado con LEDC (10 bits - máxima potencia)");
+  
+  // Test del buzzer - 3 beeps cortos a máxima potencia
+  Serial.println("Probando buzzer...");
+  for(int i = 0; i < 3; i++) {
+    playTone(1000, 100); // 1kHz
+    stopTone();
+    delay(100);
+  }
+  Serial.println("✓ Test buzzer completado");
   
   // Inicializar sensor DS18B20
   Serial.println("Inicializando DS18B20 en GPIO15...");
@@ -1080,18 +1156,26 @@ void setRecirculatorPower(bool state) {
   
   if (state) {
     // ENCENDER bomba
+    // Beep ANTES de encender (para oírlo)
+    playTone(1000, 150);
+    stopTone();
+    delay(50);
+    
     digitalWrite(RELAY_PIN, HIGH);
     recirculator_start_time = millis();
     pixel.setPixelColor(0, pixel.Color(0, 255, 0)); // Verde
     pixel.show();
-    tone(BUZZER_PIN, 1000, 100); // Beep corto
     Serial.println("✅ Bomba ENCENDIDA");
   } else {
     // APAGAR bomba
     digitalWrite(RELAY_PIN, LOW);
     pixel.setPixelColor(0, pixel.Color(255, 0, 0)); // Rojo
     pixel.show();
-    tone(BUZZER_PIN, 500, 200); // Beep grave
+    
+    // Beep DESPUÉS de apagar (para oírlo)
+    delay(100);
+    playTone(500, 200);
+    stopTone();
     Serial.println("🛑 Bomba APAGADA");
   }
 }
@@ -1135,10 +1219,21 @@ void controlarRecirculadorAutomatico() {
   // CONDICIÓN 1: Temperatura alcanzada
   if (recirculator_temp >= recirculator_max_temp) {
     setRecirculatorPower(false);
-    // Melody de éxito (simplificada - 3 notas)
-    tone(BUZZER_PIN, 523, 200); delay(250); noTone(BUZZER_PIN); // C5
-    tone(BUZZER_PIN, 659, 200); delay(250); noTone(BUZZER_PIN); // E5
-    tone(BUZZER_PIN, 784, 400); delay(450); noTone(BUZZER_PIN); // G5
+    // Melody Mario Bros (éxito) - Tocar 2 veces
+    delay(200); // Esperar a que se apague la bomba
+    for (int repeat = 0; repeat < 2; repeat++) {
+      for (int i = 0; i < mario_num_notes; i++) {
+        if (mario_melody[i] == 0) {
+          stopTone();
+          delay(mario_durations[i] * 1.25);
+        } else {
+          playTone(mario_melody[i], mario_durations[i] * 1.25);
+        }
+      }
+      stopTone();
+      delay(100); // Pequeña pausa entre repeticiones
+    }
+    stopTone();
     Serial.println("🎯 Temperatura alcanzada - Apagado automático");
     return;
   }
@@ -1146,13 +1241,12 @@ void controlarRecirculadorAutomatico() {
   // CONDICIÓN 2: Timeout (2 minutos)
   if (elapsed >= RECIRCULATOR_MAX_TIME) {
     setRecirculatorPower(false);
-    // Buzzer de timeout (2 beeps)
-    tone(BUZZER_PIN, 2000, 1000);
-    delay(1100);
-    noTone(BUZZER_PIN);
-    tone(BUZZER_PIN, 2000, 1000);
-    delay(1100);
-    noTone(BUZZER_PIN);
+    // Melody Mario Bros Game Over (fracaso)
+    delay(200); // Esperar a que se apague la bomba
+    for (int i = 0; i < mario_gameover_num_notes; i++) {
+      playTone(mario_gameover_melody[i], mario_gameover_durations[i]);
+    }
+    stopTone();
     Serial.println("⏱️ Timeout 2 minutos - Apagado automático");
     return;
   }
@@ -1393,6 +1487,8 @@ void cambiarModo(SystemMode nuevo_modo) {
       }
       tft.fillScreen(TFT_BLACK);
       mostrarModo();
+      mostrarVoltaje();
+      mostrarPantallaRecirculador();
       Serial.println("Cambiado a MODO RECIRCULADOR");
       break;
       
