@@ -123,18 +123,30 @@ float target_frequency = 50.0; // Frecuencia fija de 50 Hz
 float current_gen_frequency = 0.0;
 bool pulse_state = false;
 
-// Variables para el patrón sofisticado (29 segundos)
-enum PatternPhase {
-  PHASE_BURST1,       // 3s con gradientes 1Hz→5Hz→1Hz (test baja frecuencia)
-  PHASE_PAUSE1,       // 3s parado
-  PHASE_BURST2,       // 3s con gradientes 30Hz→50Hz→30Hz (frecuencias originales)
-  PHASE_PAUSE2,       // 3s parado
-  PHASE_STRESS_BURST, // 10s test de carga múltiples frecuencias
-  PHASE_PAUSE3        // 7s parado
+// === FRECUENCIAS BASE SEGÚN DOCUMENTACIÓN ===
+// Períodos en milisegundos - Frecuencias correspondientes
+#define PERIOD_F1  23    // 43.5 Hz - Flujo muy alto
+#define PERIOD_F2  39    // 25.6 Hz - Flujo alto
+#define PERIOD_F3  50    // 20.0 Hz - Flujo medio-alto
+#define PERIOD_F4  89    // 11.2 Hz - Flujo medio
+#define PERIOD_F5  133   // 7.5 Hz  - Flujo bajo
+#define PERIOD_F6  250   // 4.0 Hz  - Flujo muy bajo
+#define PERIOD_F7  500   // 2.0 Hz  - Flujo mínimo
+#define PERIOD_F8  10    // 100 Hz  - Límite debounce
+
+// === TEST CASES SEGÚN DOCUMENTACIÓN ===
+enum TestCase {
+  TEST_CASE_1,   // Startup Simple - Arranque básico
+  TEST_CASE_2,   // Fragmentación TRANSITION (45 pulsos)
+  TEST_CASE_4,   // Cambio de Flujo - F2 a F3
+  TEST_CASE_5,   // SINGLE_PULSE - Pulsos aislados
+  TEST_CASE_6,   // Parada Gradual
+  TEST_CASE_9,   // Escenario Completo - Uso doméstico
+  TEST_LEGACY    // Patrón antiguo (por compatibilidad)
 };
-PatternPhase current_phase = PHASE_BURST1;
-unsigned long phase_start_time = 0;
-unsigned long phase_durations[6] = {3000, 3000, 3000, 3000, 10000, 7000}; // Duraciones en ms
+
+TestCase current_test = TEST_CASE_1;
+unsigned long test_start_time = 0;
 
 // Variables para sleep
 unsigned long last_user_activity_time = 0;  // Solo actividad del usuario (botones)
@@ -187,9 +199,7 @@ Adafruit_NeoPixel pixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // Declaraciones forward
 void enterSleepMode();
-float getBurstFrequency(unsigned long phase_elapsed);
-float getBurst2Frequency(unsigned long phase_elapsed);
-float getStressFrequency(unsigned long stress_elapsed);
+float getTestCaseFrequency(TestCase test, unsigned long elapsed_ms);
 void inicializarRecirculador();
 void setRecirculatorPower(bool state);
 void leerTemperaturaRecirculador();
@@ -431,146 +441,235 @@ void inicializarGenerador() {
   current_gen_frequency = 0.0;
   pulse_state = false;
   
-  // Inicializar el patrón desde la primera fase
-  current_phase = PHASE_BURST1;
-  phase_start_time = millis();
+  // Inicializar con TEST_CASE_1 por defecto
+  current_test = TEST_CASE_1;
+  test_start_time = millis();
   
-  Serial.println("Generador inicializado - Patrón sofisticado (29s):");
-  Serial.println("Fase 1: BURST1 (3s con gradientes 30-50-30Hz)");
-  Serial.println("Fase 2: PAUSE1 (3s parado)");
-  Serial.println("Fase 3: BURST2 (3s con gradientes 30-50-30Hz)");
-  Serial.println("Fase 4: PAUSE2 (3s parado)");
-  Serial.println("Fase 5: STRESS_BURST (10s test de carga 15-100Hz)");
-  Serial.println("Fase 6: PAUSE3 (7s parado)");
+  Serial.println("Generador inicializado - Sistema de Test Cases:");
+  Serial.println("Test Case activo: TEST_CASE_1 (Startup Simple)");
+  Serial.println("\nFrecuencias base definidas:");
+  Serial.println("  F1: 23ms  = 43.5 Hz  (Flujo muy alto)");
+  Serial.println("  F2: 39ms  = 25.6 Hz  (Flujo alto)");
+  Serial.println("  F3: 50ms  = 20.0 Hz  (Flujo medio-alto)");
+  Serial.println("  F4: 89ms  = 11.2 Hz  (Flujo medio)");
+  Serial.println("  F5: 133ms = 7.5 Hz   (Flujo bajo)");
+  Serial.println("  F6: 250ms = 4.0 Hz   (Flujo muy bajo)");
+  Serial.println("  F7: 500ms = 2.0 Hz   (Flujo mínimo)");
+  Serial.println("  F8: 10ms  = 100 Hz   (Límite debounce)");
   
-  // VERIFICACIÓN INICIAL: Mostrar algunas frecuencias de muestra
-  Serial.println("\n=== VERIFICACIÓN DE FRECUENCIAS ===");
-  Serial.println("BURST1 - Bajas frecuencias (muestras):");
-  Serial.print("  0ms: "); Serial.print(getBurstFrequency(0), 2); Serial.println("Hz (inicio: 1Hz)");
-  Serial.print("  500ms: "); Serial.print(getBurstFrequency(500), 2); Serial.println("Hz (subida)");
-  Serial.print("  1000ms: "); Serial.print(getBurstFrequency(1000), 2); Serial.println("Hz (pico: 5Hz)");
-  Serial.print("  1500ms: "); Serial.print(getBurstFrequency(1500), 2); Serial.println("Hz (mantiene)");
-  Serial.print("  2000ms: "); Serial.print(getBurstFrequency(2000), 2); Serial.println("Hz (inicio bajada)");
-  Serial.print("  2500ms: "); Serial.print(getBurstFrequency(2500), 2); Serial.println("Hz (bajando)");
-  Serial.print("  3000ms: "); Serial.print(getBurstFrequency(3000), 2); Serial.println("Hz (final: 1Hz)");
-  
-  Serial.println("BURST2 - Frecuencias originales (muestras):");
-  Serial.print("  0ms: "); Serial.print(getBurst2Frequency(0), 2); Serial.println("Hz (inicio: 30Hz)");
-  Serial.print("  250ms: "); Serial.print(getBurst2Frequency(250), 2); Serial.println("Hz (subida)");
-  Serial.print("  500ms: "); Serial.print(getBurst2Frequency(500), 2); Serial.println("Hz (pico: 50Hz)");
-  Serial.print("  1500ms: "); Serial.print(getBurst2Frequency(1500), 2); Serial.println("Hz (mantiene)");
-  Serial.print("  2500ms: "); Serial.print(getBurst2Frequency(2500), 2); Serial.println("Hz (inicio bajada)");
-  Serial.print("  2750ms: "); Serial.print(getBurst2Frequency(2750), 2); Serial.println("Hz (bajando)");
-  Serial.print("  3000ms: "); Serial.print(getBurst2Frequency(3000), 2); Serial.println("Hz (final: 30Hz)");
-  
-  Serial.println("STRESS_BURST (muestras):");
-  Serial.print("  0ms: "); Serial.print(getStressFrequency(0), 2); Serial.println("Hz");
-  Serial.print("  2500ms: "); Serial.print(getStressFrequency(2500), 2); Serial.println("Hz");
-  Serial.print("  5000ms: "); Serial.print(getStressFrequency(5000), 2); Serial.println("Hz");
-  Serial.print("  6000ms: "); Serial.print(getStressFrequency(6000), 2); Serial.println("Hz");
-  Serial.print("  7500ms: "); Serial.print(getStressFrequency(7500), 2); Serial.println("Hz");
-  Serial.print("  9000ms: "); Serial.print(getStressFrequency(9000), 2); Serial.println("Hz");
-  Serial.println("=========================================\n");
+  Serial.println("\nTest Cases disponibles:");
+  Serial.println("  1: Startup Simple (8.5s)");
+  Serial.println("  2: Fragmentación TRANSITION (10s)");
+  Serial.println("  4: Cambio de Flujo (3.5s)");
+  Serial.println("  5: SINGLE_PULSE (35s)");
+  Serial.println("  6: Parada Gradual (4.4s)");
+  Serial.println("  9: Escenario Completo (271s)");
+  Serial.println("  L: Legacy Pattern (29s cíclico)");
+  Serial.println("\nUsar botones para cambiar test case en modo WRITE");
 }
 
-// Función para calcular frecuencia con gradiente en BURST (3s)
-float getBurstFrequency(unsigned long phase_elapsed) {
-  if (phase_elapsed < 1000) {
-    // Gradiente arranque lento: 1Hz → 5Hz en 1000ms (1 segundo)
-    return 1.0 + (4.0 * phase_elapsed / 1000.0);
-  } else if (phase_elapsed > 2000) {
-    // Gradiente parada lento: 5Hz → 1Hz en 1000ms finales
-    unsigned long remaining = 3000 - phase_elapsed;
-    return 1.0 + (4.0 * remaining / 1000.0);
-  } else {
-    // Frecuencia pico: 5Hz estable por 1 segundo
-    return 5.0;
+// === FUNCIÓN UNIFICADA PARA GENERAR FRECUENCIAS SEGÚN TEST CASE ===
+float getTestCaseFrequency(TestCase test, unsigned long elapsed_ms) {
+  switch(test) {
+    
+    case TEST_CASE_1: {
+      // TEST 1: Startup Simple (8.5s total)
+      // Arranque: F5→F3→F2 (10 pulsos transición)
+      // Flujo: F2 (39ms) por 30 pulsos estables
+      // Parada: timeout 2s
+      
+      if (elapsed_ms < 1330) {  // ~10 pulsos F5 (133ms cada uno)
+        return 1000.0 / PERIOD_F5;
+      }
+      else if (elapsed_ms < 1830) {  // ~10 pulsos alternados F5→F3 (transición)
+        // Alternar entre F5 y F3
+        int pulse_num = (elapsed_ms - 1330) / 91;
+        return (pulse_num % 2 == 0) ? 1000.0/PERIOD_F5 : 1000.0/PERIOD_F3;
+      }
+      else if (elapsed_ms < 3000) {  // Flujo estable F2 (39ms) ~30 pulsos
+        return 1000.0 / PERIOD_F2;
+      }
+      else {  // Parada - timeout
+        return 0.0;
+      }
+    }
+    
+    case TEST_CASE_2: {
+      // TEST 2: Fragmentación TRANSITION (10s)
+      // Arranque gradual con 45 pulsos de transición
+      // F6→F5→F4→F3→F2 (9 pulsos cada escalón)
+      
+      if (elapsed_ms < 2250) {  // 9 pulsos F6 (250ms)
+        return 1000.0 / PERIOD_F6;
+      }
+      else if (elapsed_ms < 3447) {  // 9 pulsos F5 (133ms)
+        return 1000.0 / PERIOD_F5;
+      }
+      else if (elapsed_ms < 4248) {  // 9 pulsos F4 (89ms)
+        return 1000.0 / PERIOD_F4;
+      }
+      else if (elapsed_ms < 4698) {  // 9 pulsos F3 (50ms)
+        return 1000.0 / PERIOD_F3;
+      }
+      else if (elapsed_ms < 5049) {  // 9 pulsos F2 (39ms)
+        return 1000.0 / PERIOD_F2;
+      }
+      else if (elapsed_ms < 6219) {  // 30 pulsos estables F2
+        return 1000.0 / PERIOD_F2;
+      }
+      else {  // Parada
+        return 0.0;
+      }
+    }
+    
+    case TEST_CASE_4: {
+      // TEST 4: Cambio de Flujo (3.5s)
+      // F2 (30 pulsos) → F3 (30 pulsos) → Parada
+      
+      if (elapsed_ms < 1170) {  // 30 pulsos F2 (39ms)
+        return 1000.0 / PERIOD_F2;
+      }
+      else if (elapsed_ms < 2670) {  // 30 pulsos F3 (50ms)
+        return 1000.0 / PERIOD_F3;
+      }
+      else {  // Parada
+        return 0.0;
+      }
+    }
+    
+    case TEST_CASE_5: {
+      // TEST 5: SINGLE_PULSE (35s)
+      // Pulsos aislados con timeouts largos
+      
+      if (elapsed_ms < 50) {  // Pulso 1
+        return 1000.0 / PERIOD_F2;
+      }
+      else if (elapsed_ms >= 5000 && elapsed_ms < 5050) {  // Pulso 2 (t=5s)
+        return 1000.0 / PERIOD_F2;
+      }
+      else if (elapsed_ms >= 15000 && elapsed_ms < 15050) {  // Pulso 3 (t=15s)
+        return 1000.0 / PERIOD_F2;
+      }
+      else if (elapsed_ms >= 30000 && elapsed_ms < 30050) {  // Pulso 4 (t=30s)
+        return 1000.0 / PERIOD_F2;
+      }
+      else {  // Sin pulsos (gaps largos)
+        return 0.0;
+      }
+    }
+    
+    case TEST_CASE_6: {
+      // TEST 6: Parada Gradual (4.4s)
+      // F2 estable → Desaceleración gradual F2→F3→F4→F5
+      
+      if (elapsed_ms < 1170) {  // 30 pulsos F2 (39ms)
+        return 1000.0 / PERIOD_F2;
+      }
+      else if (elapsed_ms < 1670) {  // 10 pulsos F3 (50ms)
+        return 1000.0 / PERIOD_F3;
+      }
+      else if (elapsed_ms < 2560) {  // 10 pulsos F4 (89ms)
+        return 1000.0 / PERIOD_F4;
+      }
+      else if (elapsed_ms < 3890) {  // 10 pulsos F5 (133ms)
+        return 1000.0 / PERIOD_F5;
+      }
+      else {  // Parada
+        return 0.0;
+      }
+    }
+    
+    case TEST_CASE_9: {
+      // TEST 9: Escenario Completo - Uso doméstico (271s)
+      // Múltiples fases de uso real
+      
+      // FASE 1: Apertura total F5→F2→F1 + flujo F1 60s
+      if (elapsed_ms < 700) {  // Arranque gradual ~10 pulsos
+        if (elapsed_ms < 266) return 1000.0/PERIOD_F5;
+        else if (elapsed_ms < 461) return 1000.0/PERIOD_F2;
+        else return 1000.0/PERIOD_F1;
+      }
+      else if (elapsed_ms < 60700) {  // Flujo F1 durante 60s
+        return 1000.0 / PERIOD_F1;
+      }
+      else if (elapsed_ms < 62000) {  // Parada gradual F1→F2→F5
+        if (elapsed_ms < 61085) return 1000.0/PERIOD_F1;
+        else if (elapsed_ms < 61670) return 1000.0/PERIOD_F2;
+        else return 1000.0/PERIOD_F5;
+      }
+      // PAUSA 5s
+      else if (elapsed_ms < 67000) {
+        return 0.0;
+      }
+      // FASE 2: Apertura parcial F5→F3 + flujo F3 180s
+      else if (elapsed_ms < 69000) {  // Arranque F5→F3
+        return (elapsed_ms < 68330) ? 1000.0/PERIOD_F5 : 1000.0/PERIOD_F3;
+      }
+      else if (elapsed_ms < 251000) {  // Flujo F3 durante 180s
+        return 1000.0 / PERIOD_F3;
+      }
+      else if (elapsed_ms < 255000) {  // Parada gradual
+        return 1000.0 / PERIOD_F5;
+      }
+      // PAUSA 10s + microfuga
+      else if (elapsed_ms < 265000) {
+        return 0.0;
+      }
+      else if (elapsed_ms >= 267000 && elapsed_ms < 267050) {  // Microfuga
+        return 1000.0 / PERIOD_F2;
+      }
+      else {
+        return 0.0;
+      }
+    }
+    
+    case TEST_LEGACY:
+    default: {
+      // Patrón legacy (antiguo patrón de 29s para compatibilidad)
+      unsigned long phase_elapsed = elapsed_ms % 29000;
+      
+      if (phase_elapsed < 3000) {
+        // BURST1: 1Hz→5Hz→1Hz
+        if (phase_elapsed < 1000) return 1.0 + (4.0 * phase_elapsed / 1000.0);
+        else if (phase_elapsed > 2000) return 1.0 + (4.0 * (3000 - phase_elapsed) / 1000.0);
+        else return 5.0;
+      }
+      else if (phase_elapsed < 6000) {
+        return 0.0;  // PAUSE1
+      }
+      else if (phase_elapsed < 9000) {
+        // BURST2: 30Hz→50Hz→30Hz
+        unsigned long burst_elapsed = phase_elapsed - 6000;
+        if (burst_elapsed < 500) return 30.0 + (20.0 * burst_elapsed / 500.0);
+        else if (burst_elapsed > 2500) return 30.0 + (20.0 * (3000 - burst_elapsed) / 500.0);
+        else return 50.0;
+      }
+      else if (phase_elapsed < 12000) {
+        return 0.0;  // PAUSE2
+      }
+      else if (phase_elapsed < 22000) {
+        // STRESS_BURST: múltiples frecuencias
+        unsigned long stress_elapsed = phase_elapsed - 12000;
+        if (stress_elapsed < 500) return 80.0;
+        else if (stress_elapsed < 1000) return 70.0;
+        else if (stress_elapsed < 1500) return 60.0;
+        else if (stress_elapsed < 2000) return 50.0;
+        else return 40.0;
+      }
+      else {
+        return 0.0;  // PAUSE3
+      }
+    }
   }
 }
 
-// Función para calcular frecuencia con gradiente en BURST2 (3s) - Frecuencias originales
-float getBurst2Frequency(unsigned long phase_elapsed) {
-  if (phase_elapsed < 500) {
-    // Gradiente arranque: 30Hz → 50Hz en 500ms
-    return 30.0 + (20.0 * phase_elapsed / 500.0);
-  } else if (phase_elapsed > 2500) {
-    // Gradiente parada: 50Hz → 30Hz en 500ms finales
-    unsigned long remaining = 3000 - phase_elapsed;
-    return 30.0 + (20.0 * remaining / 500.0);
-  } else {
-    // Frecuencia nominal: 50Hz estable
-    return 50.0;
-  }
-}
-
-// Función para frecuencia en STRESS_BURST (10s)
-float getStressFrequency(unsigned long stress_elapsed) {
-  // Patrón decreciente inicial (5s)
-  if (stress_elapsed < 500) return 80.0;
-  else if (stress_elapsed < 1000) return 70.0;
-  else if (stress_elapsed < 1500) return 60.0;
-  else if (stress_elapsed < 2000) return 50.0;
-  else if (stress_elapsed < 2500) return 40.0;
-  else if (stress_elapsed < 3000) return 35.0;
-  else if (stress_elapsed < 3500) return 30.0;
-  else if (stress_elapsed < 4000) return 25.0;
-  else if (stress_elapsed < 4500) return 20.0;
-  else if (stress_elapsed < 5000) return 15.0;
-  
-  // Segmento variable (2.5s) - cambio cada 100ms
-  else if (stress_elapsed < 7500) {
-    uint8_t segment = (stress_elapsed - 5000) / 100;
-    // Frecuencias específicas según especificaciones (máximo 100Hz)
-    float frequencies[] = {90, 70, 85, 45, 75, 35, 95, 60, 80, 25, 
-                          88, 55, 78, 30, 92, 40, 82, 65, 86, 20,
-                          96, 58, 74, 48, 100};
-    return frequencies[segment % 25];
-  }
-  
-  // Burst final alta frecuencia (2.5s) - máximo 100Hz
-  else return 100.0;
-}
-
-// Función para generar pulsos con patrón sofisticado
+// Función para generar pulsos según test cases documentados
 void generarPulsos() {
   unsigned long current_time = millis();
-  unsigned long phase_elapsed = current_time - phase_start_time;
+  unsigned long test_elapsed = current_time - test_start_time;
   
-  // Verificar si es tiempo de cambiar de fase
-  if (phase_elapsed >= phase_durations[current_phase]) {
-    // Cambiar a la siguiente fase
-    current_phase = (PatternPhase)((current_phase + 1) % 6);
-    phase_start_time = current_time;
-    phase_elapsed = 0;
-    
-    // Detener pulsos al cambiar de fase
-    digitalWrite(SENSOR_PIN, LOW);
-    pulse_state = false;
-    
-    // Mostrar información de la nueva fase
-    String phase_names[] = {"BURST1 (3s-gradientes)", "PAUSE1 (3s)", 
-                           "BURST2 (3s-gradientes)", "PAUSE2 (3s)", 
-                           "STRESS_BURST (10s-multicarga)", "PAUSE3 (7s)"};
-    Serial.print("Cambio a fase: ");
-    Serial.println(phase_names[current_phase]);
-  }
-  
-  // Determinar frecuencia según fase
-  float target_freq = 0.0;
-  switch(current_phase) {
-    case PHASE_BURST1:
-      target_freq = getBurstFrequency(phase_elapsed);  // 1Hz→5Hz→1Hz
-      break;
-    case PHASE_BURST2:
-      target_freq = getBurst2Frequency(phase_elapsed); // 30Hz→50Hz→30Hz
-      break;
-    case PHASE_STRESS_BURST:
-      target_freq = getStressFrequency(phase_elapsed);
-      break;
-    default:
-      target_freq = 0.0; // Pausas
-      break;
-  }
+  // Obtener frecuencia actual según test case
+  float target_freq = getTestCaseFrequency(current_test, test_elapsed);
   
   // Generar pulsos si hay frecuencia
   if (target_freq > 0) {
@@ -583,10 +682,10 @@ void generarPulsos() {
     static float last_logged_freq = -1;
     if (current_time - last_freq_log >= SERIAL_DEBUG_INTERVAL_MS) {
       if (abs(target_freq - last_logged_freq) > 0.1) { // Solo si hay cambio significativo
-        Serial.print("FREQ_CHECK - Fase: ");
-        Serial.print(current_phase);
+        Serial.print("FREQ_CHECK - Test: ");
+        Serial.print(current_test);
         Serial.print(", Elapsed: ");
-        Serial.print(phase_elapsed);
+        Serial.print(test_elapsed);
         Serial.print("ms, Target: ");
         Serial.print(target_freq, 2);
         Serial.print("Hz, Displayed: ");
@@ -997,23 +1096,25 @@ void mostrarInfoSensor() {
       Serial.println("ms");
     }
     
-    // Mostrar fase actual y tiempo restante
-    unsigned long phase_elapsed = millis() - phase_start_time;
-    float remaining = (phase_durations[current_phase] - phase_elapsed) / 1000.0;
+    // Mostrar test case actual y tiempo transcurrido
+    unsigned long test_elapsed = millis() - test_start_time;
+    float elapsed_sec = test_elapsed / 1000.0;
     
-    const char* phase_names[] = {"Burst1", "Pause1", "Burst2", "Pause2", "Stress", "Pause3"};
+    const char* test_names[] = {"TC1:Startup", "TC2:Fragment", "TC4:Change", "TC5:Single", "TC6:Stop", "TC9:Full", "Legacy"};
     char status_text[40];
-    snprintf(status_text, sizeof(status_text), "%s: %.1fs", phase_names[current_phase], remaining);
+    snprintf(status_text, sizeof(status_text), "%s: %.1fs", test_names[current_test], elapsed_sec);
     
     if (strcmp(status_text, last_total_text) != 0) {
       tft.fillRect(5, 25, 160, 15, TFT_BLACK);
       uint16_t color;
-      if (current_phase == PHASE_BURST1 || current_phase == PHASE_BURST2) {
-        color = TFT_RED; // Burst con gradientes
-      } else if (current_phase == PHASE_STRESS_BURST) {
-        color = TFT_MAGENTA; // Stress test
+      if (current_test == TEST_CASE_1 || current_test == TEST_CASE_2) {
+        color = TFT_CYAN; // Tests básicos
+      } else if (current_test == TEST_CASE_9) {
+        color = TFT_MAGENTA; // Test completo
+      } else if (current_test == TEST_LEGACY) {
+        color = TFT_ORANGE; // Legacy
       } else {
-        color = TFT_CYAN; // Pausas
+        color = TFT_GREEN; // Otros tests
       }
       tft.setTextColor(color);
       tft.setTextSize(1);
@@ -1022,8 +1123,8 @@ void mostrarInfoSensor() {
       strcpy(last_total_text, status_text);
     }
     
-    // Mostrar patrón completo actualizado
-    const char* pattern_text = "Gradientes+Stress: 29s total (max 100Hz)";
+    // Mostrar descripción del test case actualizado
+    const char* pattern_text = "Test Cases: F1-F8 (2-100Hz)";
     if (strcmp(pattern_text, last_phase_text) != 0) {
       tft.fillRect(5, 40, 230, 10, TFT_BLACK);
       tft.setTextColor(TFT_DARKGREY);
@@ -1420,7 +1521,26 @@ void setup() {
 void manejarBotonIzquierdo() {
   updateUserActivity();
   
-  if (current_mode == MODE_RECIRCULATOR) {
+  if (current_mode == MODE_WRITE) {
+    // En modo WRITE: cambiar test case
+    int next_test = (int)current_test + 1;
+    if (next_test > TEST_LEGACY) next_test = 0;
+    current_test = (TestCase)next_test;
+    test_start_time = millis();  // Reiniciar timer del test
+    
+    String test_names[] = {"TEST_1 (Startup)", "TEST_2 (Frag45)", "TEST_4 (Cambio)", 
+                          "TEST_5 (Single)", "TEST_6 (Parada)", "TEST_9 (Completo)", 
+                          "LEGACY (29s)"};
+    Serial.println("Cambiando a: " + test_names[current_test]);
+    
+    // Limpiar pantalla para mostrar nuevo test case
+    tft.fillRect(0, 0, 240, 20, TFT_BLACK);
+    tft.setTextColor(TFT_YELLOW);
+    tft.setTextSize(1);
+    tft.setTextFont(2);
+    tft.drawString(test_names[current_test], 5, 2);
+    
+  } else if (current_mode == MODE_RECIRCULATOR) {
     // En modo Recirculador: Toggle bomba ON/OFF
     setRecirculatorPower(!recirculator_power_state);
   } else if (current_mode == MODE_WIFI_SCAN) {
