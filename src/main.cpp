@@ -118,7 +118,7 @@ SystemMode current_mode = MODE_READ;
 // Variables para el generador de pulsos
 bool generating_pulse = false;
 unsigned long next_pulse_time = 0;
-unsigned long pulse_interval = 0;
+float pulse_interval = 0;  // Cambiar a float para mantener precisión decimal
 float target_frequency = 50.0; // Frecuencia fija de 50 Hz
 float current_gen_frequency = 0.0;
 bool pulse_state = false;
@@ -677,6 +677,12 @@ void generarPulsos() {
     current_gen_frequency = target_freq; // ASEGURAR: frecuencia mostrada = frecuencia generada
     pulse_interval = 1000.0 / target_freq;
     
+    // Inicializar timing solo la primera vez
+    if (next_pulse_time == 0) {
+      next_pulse_time = current_time + (pulse_interval / 2);
+      pulse_state = false;
+    }
+    
     // LOG DETALLADO: Verificar coherencia frecuencia calculada vs mostrada
     static unsigned long last_freq_log = 0;
     static float last_logged_freq = -1;
@@ -702,44 +708,37 @@ void generarPulsos() {
     // El sleep solo se controla por actividad del usuario (botones)
     
     if (current_time >= next_pulse_time) {
+      // Calcular error de timing antes de actualizar
+      long timing_error = (long)current_time - (long)next_pulse_time;
+      
       pulse_state = !pulse_state;
       digitalWrite(SENSOR_PIN, pulse_state ? HIGH : LOW);
-      next_pulse_time = current_time + (pulse_interval / 2); // 50% duty cycle
       
-      // CONTADOR DE PULSOS: Verificar frecuencia real generada
+      unsigned long actual_pulse_time = next_pulse_time; // Guardar para log
+      next_pulse_time += (pulse_interval / 2); // 50% duty cycle - sumar al tiempo anterior para evitar drift
+      
+      // CONTADOR DE PULSOS: Log detallado de timestamps
       static unsigned long pulse_count_generated = 0;
-      static unsigned long last_freq_measurement = 0;
-      static unsigned long last_pulse_count_check = 0;
       
       if (pulse_state) { // Solo contar flancos positivos (pulsos completos)
         pulse_count_generated++;
-      }
-      
-      // Medir frecuencia real cada 5 segundos
-      if (current_time - last_freq_measurement >= SERIAL_DEBUG_SLOW_MS && last_freq_measurement > 0) {
-        unsigned long time_elapsed = current_time - last_freq_measurement;
-        unsigned long pulses_in_period = pulse_count_generated - last_pulse_count_check;
-        float measured_freq = (pulses_in_period * 1000.0) / time_elapsed;
         
-        Serial.print("REAL_FREQ_CHECK - Target: ");
-        Serial.print(target_freq, 2);
-        Serial.print("Hz, Measured: ");
-        Serial.print(measured_freq, 2);
-        Serial.print("Hz, Error: ");
-        Serial.print(abs(measured_freq - target_freq), 2);
-        Serial.print("Hz (");
-        if (target_freq > 0) {
-          Serial.print(abs(measured_freq - target_freq) / target_freq * 100, 1);
-          Serial.println("%)");
-        } else {
-          Serial.println("N/A%)");
+        // LOG DETALLADO: Timestamp de cada pulso (primeros 20 pulsos o cada 10 pulsos después)
+        if (pulse_count_generated <= 20 || pulse_count_generated % 10 == 0) {
+          Serial.print("PULSE #");
+          Serial.print(pulse_count_generated);
+          Serial.print(" - Expected: ");
+          Serial.print(actual_pulse_time);
+          Serial.print("ms, Actual: ");
+          Serial.print(current_time);
+          Serial.print("ms, Error: ");
+          Serial.print(timing_error);
+          Serial.print("ms, Freq: ");
+          Serial.print(target_freq, 2);
+          Serial.print("Hz, Period: ");
+          Serial.print(pulse_interval, 2);
+          Serial.println("ms");
         }
-        last_pulse_count_check = pulse_count_generated;
-      }
-      
-      if (last_freq_measurement == 0 || current_time - last_freq_measurement >= SERIAL_DEBUG_SLOW_MS) {
-        last_freq_measurement = current_time;
-        last_pulse_count_check = pulse_count_generated;
       }
     }
   } else {
@@ -748,6 +747,7 @@ void generarPulsos() {
     current_gen_frequency = 0.0;
     digitalWrite(SENSOR_PIN, LOW);
     pulse_state = false;
+    next_pulse_time = 0; // Reiniciar para la próxima fase
   }
 }
 
