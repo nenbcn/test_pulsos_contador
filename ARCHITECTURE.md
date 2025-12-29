@@ -76,8 +76,8 @@ WiFiNetwork wifi_networks[20];
 int wifi_count, wifi_page;
 
 // Generador de pulsos (MODE_WRITE)
-PatternPhase current_phase;
-unsigned long phase_start_time;
+TestCase current_test;          // TC6 por defecto (Secuencia Completa)
+unsigned long test_start_time;
 
 // Recirculador (MODE_RECIRCULATOR)
 bool recirculator_power_state;

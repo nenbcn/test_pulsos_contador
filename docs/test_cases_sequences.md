@@ -2,6 +2,13 @@
 
 Este documento describe las secuencias exactas de pulsos generadas por cada Test Case del gateway TTGO T-Display. Úsalo para validar que el contador procesa correctamente los pulsos recibidos.
 
+## ⚙️ Configuración Inicial
+
+**Test Case por Defecto**: `TEST_CASE_6 (Secuencia Completa)`
+- Al iniciar el sistema en MODE_WRITE, se ejecuta automáticamente TEST_CASE_6
+- Cambiar entre test cases usando el **botón izquierdo** en MODE_WRITE
+- Orden de selección: TC6 → TC1 → TC2 → TC3 → TC4 → TC5 → TC6 (cíclico)
+
 ## Frecuencias Base Definidas
 
 | Código | Período | Frecuencia | Descripción |

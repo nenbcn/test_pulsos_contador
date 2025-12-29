@@ -136,16 +136,15 @@ bool pulse_state = false;
 
 // === TEST CASES SEGÚN DOCUMENTACIÓN ===
 enum TestCase {
-  TEST_CASE_1,   // Startup Simple - Arranque básico
-  TEST_CASE_2,   // Fragmentación TRANSITION (45 pulsos)
-  TEST_CASE_4,   // Cambio de Flujo - F2 a F3
-  TEST_CASE_5,   // SINGLE_PULSE - Pulsos aislados
-  TEST_CASE_6,   // Parada Gradual
-  TEST_CASE_9,   // Escenario Completo - Uso doméstico
-  TEST_LEGACY    // Patrón antiguo (por compatibilidad)
+  TEST_CASE_6,   // Secuencia Completa (1→2→3→4→5)
+  TEST_CASE_1,   // Arranque/Parada Rápidos
+  TEST_CASE_2,   // Normal - Arranque-Estable-Parada
+  TEST_CASE_3,   // Evento Compuesto
+  TEST_CASE_4,   // Stress Test
+  TEST_CASE_5    // Single Pulse
 };
 
-TestCase current_test = TEST_CASE_1;
+TestCase current_test = TEST_CASE_6;
 unsigned long test_start_time = 0;
 
 // Variables para sleep
@@ -197,9 +196,28 @@ OneWire oneWireRecirculator(TEMP_SENSOR_PIN);
 DallasTemperature sensorTemp(&oneWireRecirculator);
 Adafruit_NeoPixel pixel(1, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
+// === ESTRUCTURA PARA SIMULACIÓN REALISTA DE PULSOS ===
+// En lugar de frecuencias fijas, modela transiciones progresivas y períodos estables
+
+enum PhaseType {
+  PHASE_TRANSITION_START,  // Arranque progresivo (período disminuye)
+  PHASE_STABLE,            // Flujo estable con jitter natural
+  PHASE_TRANSITION_STOP,   // Parada progresiva (período aumenta)
+  PHASE_PAUSE              // Sin pulsos
+};
+
+struct PulsePhase {
+  PhaseType type;
+  unsigned long duration_ms;  // Duración de esta fase
+  float period_start_ms;      // Período inicial (para transiciones)
+  float period_end_ms;        // Período final (para transiciones/estables)
+  float jitter_percent;       // Variación natural del período (ej: 2.0 = ±2%)
+};
+
 // Declaraciones forward
 void enterSleepMode();
 float getTestCaseFrequency(TestCase test, unsigned long elapsed_ms);
+float getTestCasePeriod(TestCase test, unsigned long elapsed_ms);
 void inicializarRecirculador();
 void setRecirculatorPower(bool state);
 void leerTemperaturaRecirculador();
@@ -220,6 +238,53 @@ void playTone(int frequency, int duration_ms) {
 
 void stopTone() {
   ledcWriteTone(0, 0);
+}
+
+// === FUNCIONES PARA GENERAR PERIODOS REALISTAS ===
+
+// Calcula el período para una transición progresiva (aceleración/desaceleración)
+// Usa interpolación exponencial para simular comportamiento físico real
+float calcularPeriodoTransicion(float period_start, float period_end, float progress) {
+  // progress: 0.0 a 1.0 (inicio a fin de la transición)
+  // Usar easing exponencial para suavidad realista (easeOutExpo)
+  float eased_progress = (progress == 1.0) ? 1.0 : 1.0 - pow(2.0, -10.0 * progress);
+  return period_start + (period_end - period_start) * eased_progress;
+}
+
+// Agrega jitter natural al período para simular variación física real
+float aplicarJitter(float period, float jitter_percent, unsigned long seed) {
+  if (jitter_percent <= 0.0) return period;
+  
+  // Usar seed para pseudo-aleatorio determinista (basado en tiempo)
+  unsigned long random_val = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+  float random_factor = (random_val % 2000) / 1000.0 - 1.0; // -1.0 a +1.0
+  
+  float variation = period * (jitter_percent / 100.0) * random_factor;
+  return period + variation;
+}
+
+// Calcula el período actual basado en una fase de pulsos
+float calcularPeriodoDesdeFase(const PulsePhase& phase, unsigned long phase_elapsed_ms) {
+  switch (phase.type) {
+    case PHASE_TRANSITION_START:
+    case PHASE_TRANSITION_STOP: {
+      // Transición progresiva
+      float progress = (float)phase_elapsed_ms / (float)phase.duration_ms;
+      progress = constrain(progress, 0.0, 1.0);
+      
+      float base_period = calcularPeriodoTransicion(phase.period_start_ms, phase.period_end_ms, progress);
+      return aplicarJitter(base_period, phase.jitter_percent, phase_elapsed_ms);
+    }
+    
+    case PHASE_STABLE: {
+      // Período estable con jitter
+      return aplicarJitter(phase.period_end_ms, phase.jitter_percent, phase_elapsed_ms);
+    }
+    
+    case PHASE_PAUSE:
+    default:
+      return 0.0; // Sin pulsos
+  }
 }
 
 // Función de interrupción para contar pulsos
@@ -441,226 +506,234 @@ void inicializarGenerador() {
   current_gen_frequency = 0.0;
   pulse_state = false;
   
-  // Inicializar con TEST_CASE_1 por defecto
-  current_test = TEST_CASE_1;
+  // Inicializar con TEST_CASE_6 por defecto (Secuencia Completa)
+  current_test = TEST_CASE_6;
   test_start_time = millis();
   
   Serial.println("Generador inicializado - Sistema de Test Cases:");
-  Serial.println("Test Case activo: TEST_CASE_1 (Startup Simple)");
-  Serial.println("\nFrecuencias base definidas:");
-  Serial.println("  F1: 23ms  = 43.5 Hz  (Flujo muy alto)");
-  Serial.println("  F2: 39ms  = 25.6 Hz  (Flujo alto)");
-  Serial.println("  F3: 50ms  = 20.0 Hz  (Flujo medio-alto)");
-  Serial.println("  F4: 89ms  = 11.2 Hz  (Flujo medio)");
-  Serial.println("  F5: 133ms = 7.5 Hz   (Flujo bajo)");
-  Serial.println("  F6: 250ms = 4.0 Hz   (Flujo muy bajo)");
-  Serial.println("  F7: 500ms = 2.0 Hz   (Flujo mínimo)");
-  Serial.println("  F8: 10ms  = 100 Hz   (Límite debounce)");
-  
-  Serial.println("\nTest Cases disponibles:");
-  Serial.println("  1: Startup Simple (8.5s)");
-  Serial.println("  2: Fragmentación TRANSITION (10s)");
-  Serial.println("  4: Cambio de Flujo (3.5s)");
-  Serial.println("  5: SINGLE_PULSE (35s)");
-  Serial.println("  6: Parada Gradual (4.4s)");
-  Serial.println("  9: Escenario Completo (271s)");
-  Serial.println("  L: Legacy Pattern (29s cíclico)");
+  Serial.println("Test Case activo: TEST_CASE_6 (Secuencia Completa)");
+  Serial.println("\n=== CASOS CON TRANSICIONES PROGRESIVAS (basados en logs reales) ===");
+  Serial.println("  6: Secuencia Completa - Todos los casos (~40s)");
+  Serial.println("     Ejecuta tests 1→2→3→4→5 consecutivamente con pausas");
+  Serial.println();
+  Serial.println("  1: Arranque/Parada Rápidos (~1.5s)");
+  Serial.println("     SIN fase estable - arranque 0.25s @ 23.5Hz → parada directa");
+  Serial.println();
+  Serial.println("  2: Normal - Arranque-Estable-Parada (~6s)");
+  Serial.println("     Arranque 0.7s → Estable 3s @ 20.4Hz → Parada 1.1s");
+  Serial.println("     [Basado en logs reales - 2x velocidad]");
+  Serial.println();
+  Serial.println("  3: Evento Compuesto - Grifo Adicional (~8.5s)");
+  Serial.println("     Bajo 1.5s @ 19Hz → SUBE 0.4s → ALTO 2s @ 36.4Hz");
+  Serial.println("     → BAJA 0.5s → bajo 1.5s → parada");
+  Serial.println();
+  Serial.println("  4: Stress Test - Flujo MUY Alto (~15s)");
+  Serial.println("     Flujo altísimo 12.5s @ 44.4Hz → ~555 pulsos");
+  Serial.println();
+  Serial.println("  5: Single Pulse - Fugas/Pulsos Aislados (~7s)");
+  Serial.println("     5 pulsos INDIVIDUALES con timeout de 1s entre ellos");
+  Serial.println();
+  Serial.println("  6: Secuencia Completa - Todos los casos (~40s)");
+  Serial.println("     Ejecuta tests 1→2→3→4→5 consecutivamente con pausas");
   Serial.println("\nUsar botones para cambiar test case en modo WRITE");
 }
 
-// === FUNCIÓN UNIFICADA PARA GENERAR FRECUENCIAS SEGÚN TEST CASE ===
-float getTestCaseFrequency(TestCase test, unsigned long elapsed_ms) {
+// === DEFINICIÓN DE TEST CASES REALISTAS CON TRANSICIONES PROGRESIVAS ===
+
+// TEST CASE 1: Arranque/Parada Rápidos SIN Estabilización
+// Arranque rápido que NO da tiempo a estabilizar antes de parar
+PulsePhase test1_phases[] = {
+  // Arranque muy rápido (0.25s, 75ms→43ms)
+  {PHASE_TRANSITION_START, 250, 75.0, 43.0, 2.0},
+  
+  // Parada inmediata sin fase estable (0.3s, 43ms→90ms)
+  {PHASE_TRANSITION_STOP, 300, 43.0, 90.0, 2.5},
+  
+  {PHASE_PAUSE, 1000, 0, 0, 0}
+};
+
+// TEST CASE 2: Normal (Arranque-Estable-Parada)
+// Patrón completo basado en logs reales
+PulsePhase test2_phases[] = {
+  // Arranque realista (0.7s, 81ms→48ms) - datos reales del log
+  {PHASE_TRANSITION_START, 700, 81.0, 48.0, 2.5},
+  
+  // Flujo estable (3s, ~49ms ≈ 20.4Hz con jitter real ±5%)
+  {PHASE_STABLE, 3000, 49.0, 49.0, 4.5},
+  
+  // Parada realista (1.1s, 49ms→97ms) - datos reales del log
+  {PHASE_TRANSITION_STOP, 1100, 49.0, 97.0, 3.0},
+  
+  {PHASE_PAUSE, 1000, 0, 0, 0}
+};
+
+// TEST CASE 3: Evento Compuesto (Apertura de grifo adicional)
+// Simula: grifo abierto → se abre segundo grifo → cierra uno → cierra todo
+PulsePhase test3_phases[] = {
+  // Arranque inicial (0.6s, 73ms→53ms)
+  {PHASE_TRANSITION_START, 600, 73.0, 53.0, 2.5},
+  
+  // Flujo bajo estable (1.5s, ~53ms ≈ 19Hz)
+  {PHASE_STABLE, 1500, 53.0, 53.0, 4.0},
+  
+  // Sube caudal: nuevo grifo (0.4s, 53ms→28ms) - SUBIDA DRAMÁTICA
+  {PHASE_TRANSITION_START, 400, 53.0, 28.0, 2.5},
+  
+  // Flujo MUY alto estable (2s, ~28ms ≈ 36.4Hz)
+  {PHASE_STABLE, 2000, 28.0, 28.0, 5.0},
+  
+  // Baja: cierra un grifo (0.5s, 28ms→55ms)
+  {PHASE_TRANSITION_STOP, 500, 28.0, 55.0, 3.0},
+  
+  // Vuelve a flujo bajo (1.5s, ~55ms ≈ 18.2Hz)
+  {PHASE_STABLE, 1500, 55.0, 55.0, 4.0},
+  
+  // Parada final (0.9s, 55ms→100ms)
+  {PHASE_TRANSITION_STOP, 900, 55.0, 100.0, 3.0},
+  
+  {PHASE_PAUSE, 1000, 0, 0, 0}
+};
+
+// TEST CASE 4: Flujo Alto Prolongado (Stress Test - muchos pulsos)
+// Genera gran cantidad de pulsos para probar límites del sistema
+PulsePhase test4_phases[] = {
+  // Arranque rápido a flujo MUY alto (0.35s, 65ms→23ms)
+  {PHASE_TRANSITION_START, 350, 65.0, 23.0, 2.0},
+  
+  // Flujo MUY ALTO prolongado (12.5s, ~23ms ≈ 44.4Hz) - genera ~555 pulsos
+  {PHASE_STABLE, 12500, 23.0, 23.0, 5.0},
+  
+  // Parada (0.6s, 23ms→80ms)
+  {PHASE_TRANSITION_STOP, 600, 23.0, 80.0, 2.5},
+  
+  {PHASE_PAUSE, 1500, 0, 0, 0}
+};
+
+// TEST CASE 5: Single Pulse (Detección de fugas/pulsos aislados)
+// UN SOLO pulso seguido de pausa de 1 segundo (timeout)
+PulsePhase test5_phases[] = {
+  // Pulso 1: UN solo pulso (~53ms para completar el ciclo)
+  {PHASE_STABLE, 53, 50.0, 50.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},  // Pausa 1s (timeout)
+  
+  // Pulso 2: UN solo pulso
+  {PHASE_STABLE, 55, 53.0, 53.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},  // Pausa 1s
+  
+  // Pulso 3: UN solo pulso
+  {PHASE_STABLE, 50, 48.0, 48.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},  // Pausa 1s
+  
+  // Pulso 4: UN solo pulso
+  {PHASE_STABLE, 54, 52.0, 52.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},  // Pausa 1s
+  
+  // Pulso 5: UN solo pulso final
+  {PHASE_STABLE, 51, 49.0, 49.0, 0},
+  {PHASE_PAUSE, 1500, 0, 0, 0}   // Pausa final
+};
+
+// TEST CASE 6: Secuencia Completa (todos los casos anteriores en orden)
+// Ejecuta: Test1 → pausa → Test2 → pausa → Test3 → pausa → Test4 → pausa → Test5
+PulsePhase test6_phases[] = {
+  // === TEST 1: Arranque/Parada Rápidos ===
+  {PHASE_TRANSITION_START, 250, 75.0, 43.0, 2.0},
+  {PHASE_TRANSITION_STOP, 300, 43.0, 90.0, 2.5},
+  {PHASE_PAUSE, 1500, 0, 0, 0},  // Pausa entre tests
+  
+  // === TEST 2: Normal ===
+  {PHASE_TRANSITION_START, 700, 81.0, 48.0, 2.5},
+  {PHASE_STABLE, 3000, 49.0, 49.0, 4.5},
+  {PHASE_TRANSITION_STOP, 1100, 49.0, 97.0, 3.0},
+  {PHASE_PAUSE, 1500, 0, 0, 0},  // Pausa entre tests
+  
+  // === TEST 3: Evento Compuesto ===
+  {PHASE_TRANSITION_START, 600, 73.0, 53.0, 2.5},
+  {PHASE_STABLE, 1500, 53.0, 53.0, 4.0},
+  {PHASE_TRANSITION_START, 400, 53.0, 28.0, 2.5},
+  {PHASE_STABLE, 2000, 28.0, 28.0, 5.0},
+  {PHASE_TRANSITION_STOP, 500, 28.0, 55.0, 3.0},
+  {PHASE_STABLE, 1500, 55.0, 55.0, 4.0},
+  {PHASE_TRANSITION_STOP, 900, 55.0, 100.0, 3.0},
+  {PHASE_PAUSE, 1500, 0, 0, 0},  // Pausa entre tests
+  
+  // === TEST 4: Stress Test ===
+  {PHASE_TRANSITION_START, 350, 65.0, 23.0, 2.0},
+  {PHASE_STABLE, 12500, 23.0, 23.0, 5.0},
+  {PHASE_TRANSITION_STOP, 600, 23.0, 80.0, 2.5},
+  {PHASE_PAUSE, 1500, 0, 0, 0},  // Pausa entre tests
+  
+  // === TEST 5: Single Pulse ===
+  {PHASE_STABLE, 53, 50.0, 50.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},
+  {PHASE_STABLE, 55, 53.0, 53.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},
+  {PHASE_STABLE, 50, 48.0, 48.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},
+  {PHASE_STABLE, 54, 52.0, 52.0, 0},
+  {PHASE_PAUSE, 1000, 0, 0, 0},
+  {PHASE_STABLE, 51, 49.0, 49.0, 0},
+  {PHASE_PAUSE, 2500, 0, 0, 0}   // Pausa final
+};
+
+// Función para obtener el período (en ms) según el test case y tiempo transcurrido
+float getTestCasePeriod(TestCase test, unsigned long elapsed_ms) {
+  PulsePhase* phases = nullptr;
+  int num_phases = 0;
+  
+  // Seleccionar las fases según el test case
   switch(test) {
-    
-    case TEST_CASE_1: {
-      // TEST 1: Startup Simple (8.5s total)
-      // Arranque: F5→F3→F2 (10 pulsos transición)
-      // Flujo: F2 (39ms) por 30 pulsos estables
-      // Parada: timeout 2s
-      
-      if (elapsed_ms < 1330) {  // ~10 pulsos F5 (133ms cada uno)
-        return 1000.0 / PERIOD_F5;
-      }
-      else if (elapsed_ms < 1830) {  // ~10 pulsos alternados F5→F3 (transición)
-        // Alternar entre F5 y F3
-        int pulse_num = (elapsed_ms - 1330) / 91;
-        return (pulse_num % 2 == 0) ? 1000.0/PERIOD_F5 : 1000.0/PERIOD_F3;
-      }
-      else if (elapsed_ms < 3000) {  // Flujo estable F2 (39ms) ~30 pulsos
-        return 1000.0 / PERIOD_F2;
-      }
-      else {  // Parada - timeout
-        return 0.0;
-      }
-    }
-    
-    case TEST_CASE_2: {
-      // TEST 2: Fragmentación TRANSITION (10s)
-      // Arranque gradual con 45 pulsos de transición
-      // F6→F5→F4→F3→F2 (9 pulsos cada escalón)
-      
-      if (elapsed_ms < 2250) {  // 9 pulsos F6 (250ms)
-        return 1000.0 / PERIOD_F6;
-      }
-      else if (elapsed_ms < 3447) {  // 9 pulsos F5 (133ms)
-        return 1000.0 / PERIOD_F5;
-      }
-      else if (elapsed_ms < 4248) {  // 9 pulsos F4 (89ms)
-        return 1000.0 / PERIOD_F4;
-      }
-      else if (elapsed_ms < 4698) {  // 9 pulsos F3 (50ms)
-        return 1000.0 / PERIOD_F3;
-      }
-      else if (elapsed_ms < 5049) {  // 9 pulsos F2 (39ms)
-        return 1000.0 / PERIOD_F2;
-      }
-      else if (elapsed_ms < 6219) {  // 30 pulsos estables F2
-        return 1000.0 / PERIOD_F2;
-      }
-      else {  // Parada
-        return 0.0;
-      }
-    }
-    
-    case TEST_CASE_4: {
-      // TEST 4: Cambio de Flujo (3.5s)
-      // F2 (30 pulsos) → F3 (30 pulsos) → Parada
-      
-      if (elapsed_ms < 1170) {  // 30 pulsos F2 (39ms)
-        return 1000.0 / PERIOD_F2;
-      }
-      else if (elapsed_ms < 2670) {  // 30 pulsos F3 (50ms)
-        return 1000.0 / PERIOD_F3;
-      }
-      else {  // Parada
-        return 0.0;
-      }
-    }
-    
-    case TEST_CASE_5: {
-      // TEST 5: SINGLE_PULSE (35s)
-      // Pulsos aislados con timeouts largos
-      
-      if (elapsed_ms < 50) {  // Pulso 1
-        return 1000.0 / PERIOD_F2;
-      }
-      else if (elapsed_ms >= 5000 && elapsed_ms < 5050) {  // Pulso 2 (t=5s)
-        return 1000.0 / PERIOD_F2;
-      }
-      else if (elapsed_ms >= 15000 && elapsed_ms < 15050) {  // Pulso 3 (t=15s)
-        return 1000.0 / PERIOD_F2;
-      }
-      else if (elapsed_ms >= 30000 && elapsed_ms < 30050) {  // Pulso 4 (t=30s)
-        return 1000.0 / PERIOD_F2;
-      }
-      else {  // Sin pulsos (gaps largos)
-        return 0.0;
-      }
-    }
-    
-    case TEST_CASE_6: {
-      // TEST 6: Parada Gradual (4.4s)
-      // F2 estable → Desaceleración gradual F2→F3→F4→F5
-      
-      if (elapsed_ms < 1170) {  // 30 pulsos F2 (39ms)
-        return 1000.0 / PERIOD_F2;
-      }
-      else if (elapsed_ms < 1670) {  // 10 pulsos F3 (50ms)
-        return 1000.0 / PERIOD_F3;
-      }
-      else if (elapsed_ms < 2560) {  // 10 pulsos F4 (89ms)
-        return 1000.0 / PERIOD_F4;
-      }
-      else if (elapsed_ms < 3890) {  // 10 pulsos F5 (133ms)
-        return 1000.0 / PERIOD_F5;
-      }
-      else {  // Parada
-        return 0.0;
-      }
-    }
-    
-    case TEST_CASE_9: {
-      // TEST 9: Escenario Completo - Uso doméstico (271s)
-      // Múltiples fases de uso real
-      
-      // FASE 1: Apertura total F5→F2→F1 + flujo F1 60s
-      if (elapsed_ms < 700) {  // Arranque gradual ~10 pulsos
-        if (elapsed_ms < 266) return 1000.0/PERIOD_F5;
-        else if (elapsed_ms < 461) return 1000.0/PERIOD_F2;
-        else return 1000.0/PERIOD_F1;
-      }
-      else if (elapsed_ms < 60700) {  // Flujo F1 durante 60s
-        return 1000.0 / PERIOD_F1;
-      }
-      else if (elapsed_ms < 62000) {  // Parada gradual F1→F2→F5
-        if (elapsed_ms < 61085) return 1000.0/PERIOD_F1;
-        else if (elapsed_ms < 61670) return 1000.0/PERIOD_F2;
-        else return 1000.0/PERIOD_F5;
-      }
-      // PAUSA 5s
-      else if (elapsed_ms < 67000) {
-        return 0.0;
-      }
-      // FASE 2: Apertura parcial F5→F3 + flujo F3 180s
-      else if (elapsed_ms < 69000) {  // Arranque F5→F3
-        return (elapsed_ms < 68330) ? 1000.0/PERIOD_F5 : 1000.0/PERIOD_F3;
-      }
-      else if (elapsed_ms < 251000) {  // Flujo F3 durante 180s
-        return 1000.0 / PERIOD_F3;
-      }
-      else if (elapsed_ms < 255000) {  // Parada gradual
-        return 1000.0 / PERIOD_F5;
-      }
-      // PAUSA 10s + microfuga
-      else if (elapsed_ms < 265000) {
-        return 0.0;
-      }
-      else if (elapsed_ms >= 267000 && elapsed_ms < 267050) {  // Microfuga
-        return 1000.0 / PERIOD_F2;
-      }
-      else {
-        return 0.0;
-      }
-    }
-    
-    case TEST_LEGACY:
-    default: {
-      // Patrón legacy (antiguo patrón de 29s para compatibilidad)
-      unsigned long phase_elapsed = elapsed_ms % 29000;
-      
-      if (phase_elapsed < 3000) {
-        // BURST1: 1Hz→5Hz→1Hz
-        if (phase_elapsed < 1000) return 1.0 + (4.0 * phase_elapsed / 1000.0);
-        else if (phase_elapsed > 2000) return 1.0 + (4.0 * (3000 - phase_elapsed) / 1000.0);
-        else return 5.0;
-      }
-      else if (phase_elapsed < 6000) {
-        return 0.0;  // PAUSE1
-      }
-      else if (phase_elapsed < 9000) {
-        // BURST2: 30Hz→50Hz→30Hz
-        unsigned long burst_elapsed = phase_elapsed - 6000;
-        if (burst_elapsed < 500) return 30.0 + (20.0 * burst_elapsed / 500.0);
-        else if (burst_elapsed > 2500) return 30.0 + (20.0 * (3000 - burst_elapsed) / 500.0);
-        else return 50.0;
-      }
-      else if (phase_elapsed < 12000) {
-        return 0.0;  // PAUSE2
-      }
-      else if (phase_elapsed < 22000) {
-        // STRESS_BURST: múltiples frecuencias
-        unsigned long stress_elapsed = phase_elapsed - 12000;
-        if (stress_elapsed < 500) return 80.0;
-        else if (stress_elapsed < 1000) return 70.0;
-        else if (stress_elapsed < 1500) return 60.0;
-        else if (stress_elapsed < 2000) return 50.0;
-        else return 40.0;
-      }
-      else {
-        return 0.0;  // PAUSE3
-      }
-    }
+    case TEST_CASE_1:
+      phases = test1_phases;
+      num_phases = sizeof(test1_phases) / sizeof(test1_phases[0]);
+      break;
+    case TEST_CASE_2:
+      phases = test2_phases;
+      num_phases = sizeof(test2_phases) / sizeof(test2_phases[0]);
+      break;
+    case TEST_CASE_3:
+      phases = test3_phases;
+      num_phases = sizeof(test3_phases) / sizeof(test3_phases[0]);
+      break;
+    case TEST_CASE_4:
+      phases = test4_phases;
+      num_phases = sizeof(test4_phases) / sizeof(test4_phases[0]);
+      break;
+    case TEST_CASE_5:
+      phases = test5_phases;
+      num_phases = sizeof(test5_phases) / sizeof(test5_phases[0]);
+      break;
+    case TEST_CASE_6:
+      phases = test6_phases;
+      num_phases = sizeof(test6_phases) / sizeof(test6_phases[0]);
+      break;
+    default:
+      // Casos legacy eliminados
+      return 0.0;
   }
+  
+  // Encontrar la fase actual
+  unsigned long accumulated_time = 0;
+  for (int i = 0; i < num_phases; i++) {
+    unsigned long phase_end = accumulated_time + phases[i].duration_ms;
+    
+    if (elapsed_ms < phase_end) {
+      // Estamos en esta fase
+      unsigned long phase_elapsed = elapsed_ms - accumulated_time;
+      return calcularPeriodoDesdeFase(phases[i], phase_elapsed);
+    }
+    
+    accumulated_time = phase_end;
+  }
+  
+  // Si pasamos todas las fases, sin pulsos
+  return 0.0;
+}
+
+// === FUNCIÓN LEGACY ELIMINADA - Todos los casos usan sistema de fases ===
+float getTestCaseFrequency(TestCase test, unsigned long elapsed_ms) {
+  // Todos los test cases ahora usan getTestCasePeriod()
+  return 0.0;
 }
 
 // Función para generar pulsos según test cases documentados
@@ -668,14 +741,26 @@ void generarPulsos() {
   unsigned long current_time = millis();
   unsigned long test_elapsed = current_time - test_start_time;
   
-  // Obtener frecuencia actual según test case
-  float target_freq = getTestCaseFrequency(current_test, test_elapsed);
+  // NUEVO: Intentar obtener período directamente (para casos con transiciones progresivas)
+  float target_period = getTestCasePeriod(current_test, test_elapsed);
+  float target_freq = 0.0;
   
-  // Generar pulsos si hay frecuencia
-  if (target_freq > 0) {
+  // Si no hay período del nuevo sistema, usar el sistema legacy de frecuencias
+  if (target_period == 0.0) {
+    target_freq = getTestCaseFrequency(current_test, test_elapsed);
+    if (target_freq > 0) {
+      target_period = 1000.0 / target_freq;
+    }
+  } else {
+    // Calcular frecuencia desde el período para mostrarla
+    target_freq = 1000.0 / target_period;
+  }
+  
+  // Generar pulsos si hay período válido
+  if (target_period > 0) {
     generating_pulse = true;
-    current_gen_frequency = target_freq; // ASEGURAR: frecuencia mostrada = frecuencia generada
-    pulse_interval = 1000.0 / target_freq;
+    current_gen_frequency = target_freq;
+    pulse_interval = target_period;
     
     // Inicializar timing solo la primera vez
     if (next_pulse_time == 0) {
@@ -683,23 +768,23 @@ void generarPulsos() {
       pulse_state = false;
     }
     
-    // LOG DETALLADO: Verificar coherencia frecuencia calculada vs mostrada
+    // LOG DETALLADO: Verificar coherencia (solo cambios significativos)
     static unsigned long last_freq_log = 0;
     static float last_logged_freq = -1;
+    static float last_logged_period = -1;
     if (current_time - last_freq_log >= SERIAL_DEBUG_INTERVAL_MS) {
-      if (abs(target_freq - last_logged_freq) > 0.1) { // Solo si hay cambio significativo
-        Serial.print("FREQ_CHECK - Test: ");
+      if (abs(target_freq - last_logged_freq) > 0.1 || abs(target_period - last_logged_period) > 1.0) {
+        Serial.print("PULSE_GEN - Test: ");
         Serial.print(current_test);
         Serial.print(", Elapsed: ");
         Serial.print(test_elapsed);
-        Serial.print("ms, Target: ");
+        Serial.print("ms, Period: ");
+        Serial.print(target_period, 2);
+        Serial.print("ms, Freq: ");
         Serial.print(target_freq, 2);
-        Serial.print("Hz, Displayed: ");
-        Serial.print(current_gen_frequency, 2);
-        Serial.print("Hz, Period: ");
-        Serial.print(target_freq > 0 ? (1000.0 / target_freq) : 0, 2);
-        Serial.println("ms");
+        Serial.println("Hz");
         last_logged_freq = target_freq;
+        last_logged_period = target_period;
       }
       last_freq_log = current_time;
     }
@@ -717,26 +802,22 @@ void generarPulsos() {
       unsigned long actual_pulse_time = next_pulse_time; // Guardar para log
       next_pulse_time += (pulse_interval / 2); // 50% duty cycle - sumar al tiempo anterior para evitar drift
       
-      // CONTADOR DE PULSOS: Log detallado de timestamps
+      // CONTADOR DE PULSOS: Log detallado de timestamps (primeros 20 pulsos)
       static unsigned long pulse_count_generated = 0;
       
       if (pulse_state) { // Solo contar flancos positivos (pulsos completos)
         pulse_count_generated++;
         
-        // LOG DETALLADO: Timestamp de cada pulso (primeros 20 pulsos o cada 10 pulsos después)
-        if (pulse_count_generated <= 20 || pulse_count_generated % 10 == 0) {
+        // LOG DETALLADO: Timestamp de cada pulso (primeros 20 pulsos)
+        if (pulse_count_generated <= 20) {
           Serial.print("PULSE #");
           Serial.print(pulse_count_generated);
-          Serial.print(" - Expected: ");
-          Serial.print(actual_pulse_time);
-          Serial.print("ms, Actual: ");
+          Serial.print(" - ts=");
           Serial.print(current_time);
-          Serial.print("ms, Error: ");
-          Serial.print(timing_error);
-          Serial.print("ms, Freq: ");
-          Serial.print(target_freq, 2);
-          Serial.print("Hz, Period: ");
+          Serial.print(", period=");
           Serial.print(pulse_interval, 2);
+          Serial.print("ms, error=");
+          Serial.print(timing_error);
           Serial.println("ms");
         }
       }
@@ -1100,7 +1181,7 @@ void mostrarInfoSensor() {
     unsigned long test_elapsed = millis() - test_start_time;
     float elapsed_sec = test_elapsed / 1000.0;
     
-    const char* test_names[] = {"TC1:Startup", "TC2:Fragment", "TC4:Change", "TC5:Single", "TC6:Stop", "TC9:Full", "Legacy"};
+    const char* test_names[] = {"TC6:Full", "TC1:Rapid", "TC2:Normal", "TC3:Compound", "TC4:Stress", "TC5:Single"};
     char status_text[40];
     snprintf(status_text, sizeof(status_text), "%s: %.1fs", test_names[current_test], elapsed_sec);
     
@@ -1109,10 +1190,8 @@ void mostrarInfoSensor() {
       uint16_t color;
       if (current_test == TEST_CASE_1 || current_test == TEST_CASE_2) {
         color = TFT_CYAN; // Tests básicos
-      } else if (current_test == TEST_CASE_9) {
-        color = TFT_MAGENTA; // Test completo
-      } else if (current_test == TEST_LEGACY) {
-        color = TFT_ORANGE; // Legacy
+      } else if (current_test == TEST_CASE_6) {
+        color = TFT_MAGENTA; // Test secuencial completo
       } else {
         color = TFT_GREEN; // Otros tests
       }
@@ -1524,13 +1603,12 @@ void manejarBotonIzquierdo() {
   if (current_mode == MODE_WRITE) {
     // En modo WRITE: cambiar test case
     int next_test = (int)current_test + 1;
-    if (next_test > TEST_LEGACY) next_test = 0;
+    if (next_test > TEST_CASE_5) next_test = 0;
     current_test = (TestCase)next_test;
     test_start_time = millis();  // Reiniciar timer del test
     
-    String test_names[] = {"TEST_1 (Startup)", "TEST_2 (Frag45)", "TEST_4 (Cambio)", 
-                          "TEST_5 (Single)", "TEST_6 (Parada)", "TEST_9 (Completo)", 
-                          "LEGACY (29s)"};
+    String test_names[] = {"TEST_6 (Sequential)", "TEST_1 (Rapid)", "TEST_2 (Normal)", "TEST_3 (Compound)", 
+                          "TEST_4 (Stress)", "TEST_5 (Single)"};
     Serial.println("Cambiando a: " + test_names[current_test]);
     
     // Limpiar pantalla para mostrar nuevo test case

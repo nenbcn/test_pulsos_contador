@@ -65,12 +65,17 @@ test_pulsos_contador/
 - Ideal para validar generadores externos
 
 ### 2. MODE_WRITE (Generación)
-Genera un patrón sofisticado de pulsos de 29 segundos:
-- **BURST1/2** (3s c/u): Gradientes suaves 30Hz→50Hz→30Hz
-- **STRESS_BURST** (10s): Test de carga con frecuencias variables 15Hz-100Hz
-- **PAUSAS**: 3s, 3s, 7s entre fases
+Genera test cases realistas con transiciones progresivas basadas en logs reales:
 
-Ver especificaciones completas: [`docs/pulse_implementation_guide.md`](docs/pulse_implementation_guide.md)
+**Test Cases Disponibles** (cambiar con botón izquierdo):
+- **TC6: Sequential** (~40s) - **[POR DEFECTO]** - Secuencia completa que ejecuta todos los tests
+- **TC1: Rapid** (~1.5s) - Arranque/parada rápidos sin estabilización
+- **TC2: Normal** (~6s) - Arranque gradual, fase estable, parada suave
+- **TC3: Compound** (~8.5s) - Evento compuesto (apertura de grifo adicional)
+- **TC4: Stress** (~15s) - Flujo muy alto prolongado (~555 pulsos)
+- **TC5: Single** (~7s) - Pulsos aislados con timeouts (detección de fugas)
+
+Ver especificaciones completas: [`docs/test_cases_sequences.md`](docs/test_cases_sequences.md) y [`docs/realistic_pulse_simulation.md`](docs/realistic_pulse_simulation.md)
 
 ### 3. MODE_PRESSURE (Sensor I2C)
 - Lee sensor WNK1MA a 100Hz (cada 10ms)
