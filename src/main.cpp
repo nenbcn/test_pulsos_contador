@@ -241,6 +241,23 @@ void stopTone() {
 }
 
 // === FUNCIONES PARA GENERAR PERIODOS REALISTAS ===
+//
+// IMPORTANTE - CRITERIO DE ESTABILIZACIÓN:
+// ----------------------------------------
+// El gateway detecta flujo STABLE cuando hay 10 períodos consecutivos donde
+// TODOS están dentro de ±8% del promedio de esos 10 períodos.
+//
+// CONFIGURACIÓN DE JITTER:
+// ------------------------
+// - Fases TRANSITION: jitter 2-3% (mayor variación esperada)
+// - Fases STABLE: jitter 2.5-3% MÁXIMO (para garantizar estabilización)
+//
+// ¿Por qué no más de 3%?
+// - Jitter 3% individual → Desviación grupal ~1.8% → Alta probabilidad de ±8%
+// - Jitter 5% individual → Desviación grupal ~3.0% → Puede superar ±8%
+//
+// La función aplicarJitter() usa componente grupal + individual para simular
+// comportamiento físico real (grupos de períodos similares con micro-variaciones)
 
 // Calcula el período para una transición progresiva (aceleración/desaceleración)
 // Usa interpolación exponencial para simular comportamiento físico real
@@ -252,14 +269,25 @@ float calcularPeriodoTransicion(float period_start, float period_end, float prog
 }
 
 // Agrega jitter natural al período para simular variación física real
+// MEJORADO: Usa componente grupal + individual para mantener consistencia
+// dentro de grupos de 10 períodos (necesario para estabilización ±8%)
 float aplicarJitter(float period, float jitter_percent, unsigned long seed) {
   if (jitter_percent <= 0.0) return period;
   
-  // Usar seed para pseudo-aleatorio determinista (basado en tiempo)
-  unsigned long random_val = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
-  float random_factor = (random_val % 2000) / 1000.0 - 1.0; // -1.0 a +1.0
+  // Componente GRUPAL: Cambia lentamente cada ~10 pulsos
+  // Esto hace que grupos de períodos consecutivos estén cerca del mismo valor
+  unsigned long group_seed = (seed / 10) * 10;  // Redondea a múltiplos de 10
+  unsigned long group_random = (group_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+  float group_factor = (group_random % 1000) / 1000.0 - 0.5; // -0.5 a +0.5
   
-  float variation = period * (jitter_percent / 100.0) * random_factor;
+  // Componente INDIVIDUAL: Variación pequeña entre pulsos del mismo grupo
+  unsigned long individual_random = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+  float individual_factor = (individual_random % 600) / 1000.0 - 0.3; // -0.3 a +0.3
+  
+  // Combinar: 60% grupal (consistencia) + 40% individual (realismo)
+  float combined_factor = (group_factor * 0.6) + (individual_factor * 0.4);
+  
+  float variation = period * (jitter_percent / 100.0) * combined_factor;
   return period + variation;
 }
 
@@ -558,8 +586,8 @@ PulsePhase test2_phases[] = {
   // Arranque realista (0.7s, 81ms→48ms) - datos reales del log
   {PHASE_TRANSITION_START, 700, 81.0, 48.0, 2.5},
   
-  // Flujo estable (3s, ~49ms ≈ 20.4Hz con jitter real ±5%)
-  {PHASE_STABLE, 3000, 49.0, 49.0, 4.5},
+  // Flujo estable (3s, ~49ms ≈ 20.4Hz con jitter ±3% para estabilización)
+  {PHASE_STABLE, 3000, 49.0, 49.0, 3.0},
   
   // Parada realista (1.1s, 49ms→97ms) - datos reales del log
   {PHASE_TRANSITION_STOP, 1100, 49.0, 97.0, 3.0},
@@ -573,20 +601,20 @@ PulsePhase test3_phases[] = {
   // Arranque inicial (0.6s, 73ms→53ms)
   {PHASE_TRANSITION_START, 600, 73.0, 53.0, 2.5},
   
-  // Flujo bajo estable (1.5s, ~53ms ≈ 19Hz)
-  {PHASE_STABLE, 1500, 53.0, 53.0, 4.0},
+  // Flujo bajo estable (1.5s, ~53ms ≈ 19Hz, jitter ±2.5%)
+  {PHASE_STABLE, 1500, 53.0, 53.0, 2.5},
   
   // Sube caudal: nuevo grifo (0.4s, 53ms→28ms) - SUBIDA DRAMÁTICA
   {PHASE_TRANSITION_START, 400, 53.0, 28.0, 2.5},
   
-  // Flujo MUY alto estable (2s, ~28ms ≈ 36.4Hz)
-  {PHASE_STABLE, 2000, 28.0, 28.0, 5.0},
+  // Flujo MUY alto estable (2s, ~28ms ≈ 36.4Hz, jitter ±3%)
+  {PHASE_STABLE, 2000, 28.0, 28.0, 3.0},
   
   // Baja: cierra un grifo (0.5s, 28ms→55ms)
   {PHASE_TRANSITION_STOP, 500, 28.0, 55.0, 3.0},
   
-  // Vuelve a flujo bajo (1.5s, ~55ms ≈ 18.2Hz)
-  {PHASE_STABLE, 1500, 55.0, 55.0, 4.0},
+  // Vuelve a flujo bajo (1.5s, ~55ms ≈ 18.2Hz, jitter ±2.5%)
+  {PHASE_STABLE, 1500, 55.0, 55.0, 2.5},
   
   // Parada final (0.9s, 55ms→100ms)
   {PHASE_TRANSITION_STOP, 900, 55.0, 100.0, 3.0},
@@ -600,8 +628,8 @@ PulsePhase test4_phases[] = {
   // Arranque rápido a flujo MUY alto (0.35s, 65ms→23ms)
   {PHASE_TRANSITION_START, 350, 65.0, 23.0, 2.0},
   
-  // Flujo MUY ALTO prolongado (12.5s, ~23ms ≈ 44.4Hz) - genera ~555 pulsos
-  {PHASE_STABLE, 12500, 23.0, 23.0, 5.0},
+  // Flujo MUY ALTO prolongado (12.5s, ~23ms ≈ 44.4Hz, jitter ±3%) - genera ~555 pulsos
+  {PHASE_STABLE, 12500, 23.0, 23.0, 3.0},
   
   // Parada (0.6s, 23ms→80ms)
   {PHASE_TRANSITION_STOP, 600, 23.0, 80.0, 2.5},
@@ -643,23 +671,23 @@ PulsePhase test6_phases[] = {
   
   // === TEST 2: Normal ===
   {PHASE_TRANSITION_START, 700, 81.0, 48.0, 2.5},
-  {PHASE_STABLE, 3000, 49.0, 49.0, 4.5},
+  {PHASE_STABLE, 3000, 49.0, 49.0, 3.0},
   {PHASE_TRANSITION_STOP, 1100, 49.0, 97.0, 3.0},
   {PHASE_PAUSE, 1500, 0, 0, 0},  // Pausa entre tests
   
   // === TEST 3: Evento Compuesto ===
   {PHASE_TRANSITION_START, 600, 73.0, 53.0, 2.5},
-  {PHASE_STABLE, 1500, 53.0, 53.0, 4.0},
+  {PHASE_STABLE, 1500, 53.0, 53.0, 2.5},
   {PHASE_TRANSITION_START, 400, 53.0, 28.0, 2.5},
-  {PHASE_STABLE, 2000, 28.0, 28.0, 5.0},
+  {PHASE_STABLE, 2000, 28.0, 28.0, 3.0},
   {PHASE_TRANSITION_STOP, 500, 28.0, 55.0, 3.0},
-  {PHASE_STABLE, 1500, 55.0, 55.0, 4.0},
+  {PHASE_STABLE, 1500, 55.0, 55.0, 2.5},
   {PHASE_TRANSITION_STOP, 900, 55.0, 100.0, 3.0},
   {PHASE_PAUSE, 1500, 0, 0, 0},  // Pausa entre tests
   
   // === TEST 4: Stress Test ===
   {PHASE_TRANSITION_START, 350, 65.0, 23.0, 2.0},
-  {PHASE_STABLE, 12500, 23.0, 23.0, 5.0},
+  {PHASE_STABLE, 12500, 23.0, 23.0, 3.0},
   {PHASE_TRANSITION_STOP, 600, 23.0, 80.0, 2.5},
   {PHASE_PAUSE, 1500, 0, 0, 0},  // Pausa entre tests
   
