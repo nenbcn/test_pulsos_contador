@@ -44,10 +44,42 @@ Sistema de monitoreo y generación de pulsos para ESP32 TTGO T-Display con 4 mod
 ```
 test_pulsos_contador/
 ├── src/
-│   └── main.cpp                          # Código principal (1286 líneas)
+│   ├── main.cpp                          # Coordinador principal (~200 líneas)
+│   ├── common.cpp                        # Variables y funciones compartidas
+│   ├── display.cpp                       # Funciones de visualización
+│   ├── mode_read.cpp                     # Modo lectura de pulsos
+│   ├── mode_write.cpp                    # Modo generación de pulsos
+│   ├── mode_pressure.cpp                 # Modo sensor de presión I2C
+│   ├── mode_recirculator.cpp             # Modo recirculador
+│   └── mode_wifi.cpp                     # Modo escáner WiFi
+├── include/
+│   ├── config.h                          # Configuraciones y constantes
+│   ├── common.h                          # Headers compartidos
+│   ├── display.h                         # Headers de visualización
+│   ├── mode_read.h                       # Header modo lectura
+│   ├── mode_write.h                      # Header modo escritura
+│   ├── mode_pressure.h                   # Header modo presión
+│   ├── mode_recirculator.h               # Header modo recirculador
+│   └── mode_wifi.h                       # Header modo WiFi
 ├── docs/
-│   └── pulse_implementation_guide.md     # Código de referencia para pulsos
-├── platformio.ini                        # Configuración PlatformIO
+│   ├── pulse_implementation_guide.md     # Guía de implementación de pulsos
+│   ├── realistic_pulse_simulation.md     # Simulación realista de pulsos
+│   └── test_cases_sequences.md           # Casos de prueba
+├── ESTRUCTURA_CODIGO.md                  # 📖 Documentación de la estructura
+├── DIAGRAMA_ARQUITECTURA.md              # 📊 Diagramas de arquitectura
+├── RESUMEN_REESTRUCTURACION.md           # ✅ Resumen de cambios
+└── platformio.ini                        # Configuración PlatformIO
+```
+
+### 🔧 Arquitectura Modular
+
+El código está organizado en **módulos independientes**, cada uno responsable de un modo específico:
+
+- **Archivos comunes**: Configuración, variables globales, funciones de pantalla
+- **Módulos de modo**: Cada modo tiene su propio .h y .cpp
+- **main.cpp**: Coordinador ligero que delega a los módulos
+
+📖 **Ver documentación detallada**: [ESTRUCTURA_CODIGO.md](ESTRUCTURA_CODIGO.md)
 │
 ├── README.md                             # Introducción y Quick Start
 ├── ARCHITECTURE.md                       # Arquitectura del código (FSM, flujos)
