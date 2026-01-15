@@ -17,15 +17,32 @@ void mostrarInfoSensor();
 
 void setup() {
   Serial.begin(115200);
+  delay(100);  // Esperar para que serial se estabilice
   
   // Verificar si despertamos del sleep
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  bool waking_from_sleep = (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 || wakeup_reason == ESP_SLEEP_WAKEUP_EXT1);
+  bool waking_from_sleep = (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0 || 
+                            wakeup_reason == ESP_SLEEP_WAKEUP_EXT1 ||
+                            wakeup_reason == ESP_SLEEP_WAKEUP_TIMER);
   
-  if (waking_from_sleep) {
+  if (waking_from_sleep && had_sleep) {
     Serial.println("=== DESPERTANDO DEL SLEEP ===");
+    Serial.print("Razón: ");
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) Serial.println("Botón IZQUIERDO");
+    else if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) Serial.println("Botón DERECHO");
+    else if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) Serial.println("TIMEOUT SEGURIDAD (10min)");
+    Serial.print("Restaurando modo: ");
+    Serial.println(saved_mode);
+    // Validar que saved_mode es válido
+    if (saved_mode < MODE_READ || saved_mode > MODE_WIFI_SCAN) {
+      Serial.println("ERROR: modo guardado corrupto, resetear a READ");
+      saved_mode = MODE_READ;
+    }
   } else {
-    Serial.println("=== INICIO NORMAL ===");
+    Serial.println("=== INICIO NORMAL (NO desde sleep) ===");
+    saved_mode = MODE_READ;  // Modo por defecto
+    had_sleep = false;       // Resetear flag
+    waking_from_sleep = false;  // Forzar inicio normal
   }
   
   pinMode(4, OUTPUT);
@@ -34,9 +51,8 @@ void setup() {
   pinMode(BUTTON_LEFT, INPUT_PULLUP);
   pinMode(BUTTON_RIGHT, INPUT_PULLUP);
   
-  // Configurar el pin del sensor/generador
-  pinMode(SENSOR_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(SENSOR_PIN), pulseInterrupt, RISING);
+  // No configurar GPIO21 aquí - se hará en inicializarModoRead()
+  // para evitar wake-ups no deseados en modo WRITE
 
   // Inicializar I2C para el sensor de presión
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -52,28 +68,44 @@ void setup() {
   inicializarGenerador();
   inicializarRecirculador();
   
-  // Leer y mostrar voltaje inicial
+  // Leer voltaje inicial
   voltaje = leerVoltaje();
-  mostrarVoltaje();
-  mostrarInfoSensor();
-  mostrarModo();
   
   // Inicializar timer de actividad del usuario
   last_user_activity_time = millis();
   in_sleep_mode = false;
   
-  Serial.println("=== TTGO T-Display - Monitor/Generador/Presión/WiFi Scanner ===");
-  Serial.println("GPIO21 - Sensor/Generador configurado");
-  Serial.println("GPIO32/22 - I2C para sensor de presión WNK1MA (SDA/SCL)");
-  Serial.println("GPIO15/12/17/13 - Recirculador (Temp/Relé/Buzzer/LED)");
-  Serial.println("Botón IZQUIERDO: Toggle bomba / Cambiar página WiFi");
-  Serial.println("Botón DERECHO: Ciclar READ->WRITE->PRESSURE->RECIR->WiFi->READ");
-  Serial.println("Sleep automático: 5 minutos sin actividad de BOTONES");
-  Serial.println("Escala gráfico: 0-75Hz (fija) / AUTO (presión)");
-  Serial.println("Modo inicial: LECTURA");
+  Serial.println("=== Sistema de sleep configurado ===");
+  Serial.print("Tiempo hasta sleep: ");
+  Serial.print(SLEEP_TIMEOUT_MS / 1000);
+  Serial.println(" segundos de inactividad");
+  Serial.print("Actividad inicial: ");
+  Serial.print(last_user_activity_time);
+  Serial.println(" ms");
   
-  if (waking_from_sleep) {
-    Serial.println("Sistema reactivado desde sleep");
+  Serial.println("=== TTGO T-Display - Monitor/Generador/Presion/WiFi Scanner ===");
+  Serial.println("GPIO21 - Sensor/Generador configurado");
+  Serial.println("GPIO32/22 - I2C para sensor de presion WNK1MA (SDA/SCL)");
+  Serial.println("GPIO15/12/17/13 - Recirculador (Temp/Rele/Buzzer/LED)");
+  Serial.println("Boton IZQUIERDO: Toggle bomba / Cambiar pagina WiFi");
+  Serial.println("Boton DERECHO: Ciclar READ->WRITE->PRESSURE->RECIR->WiFi->READ");
+  Serial.println("Sleep automático: 5 minutos sin actividad de BOTONES");
+  Serial.println("Wake-up: SOLO por botones GPIO0 y GPIO35 (NO por GPIO21)");
+  Serial.println("Escala gráfico: 0-75Hz (fija) / AUTO (presión)");
+  
+  // Forzar inicialización del modo para configurar GPIO21 correctamente
+  if (waking_from_sleep && had_sleep) {
+    Serial.print("Sistema reactivado desde sleep - Restaurando modo: ");
+    Serial.println(saved_mode);
+    // IMPORTANTE: Registrar actividad al despertar para evitar sleep inmediato
+    last_user_activity_time = millis();
+    Serial.println("*** ACTIVIDAD REGISTRADA AL DESPERTAR - Timer reseteado ***");
+    current_mode = (SystemMode)((saved_mode + 1) % 5); // Forzar diferente para que cambiarModo() ejecute
+    cambiarModo(saved_mode);
+  } else {
+    Serial.println("Modo inicial: LECTURA");
+    current_mode = MODE_WRITE; // Forzar diferente para que cambiarModo() ejecute
+    cambiarModo(MODE_READ);
   }
 }
 
@@ -84,13 +116,18 @@ void cambiarModo(SystemMode nuevo_modo) {
   current_mode = nuevo_modo;
   
   updateUserActivity();
+  Serial.println("[MODO] Actividad registrada al cambiar modo");
   
   switch (nuevo_modo) {
     case MODE_READ:
       inicializarModoRead();
       tft.fillScreen(TFT_BLACK);
+      tft.setTextColor(TFT_GREEN);
+      tft.setTextSize(2);
+      tft.setTextFont(2);
+      tft.setTextDatum(TL_DATUM);
+      tft.drawString("READ", 5, 5);
       inicializarGrafico();
-      mostrarModo();
       Serial.println("Cambiado a MODO LECTURA");
       break;
       
@@ -98,6 +135,9 @@ void cambiarModo(SystemMode nuevo_modo) {
       detachInterrupt(digitalPinToInterrupt(SENSOR_PIN));
       pinMode(SENSOR_PIN, OUTPUT);
       digitalWrite(SENSOR_PIN, LOW);
+      Serial.println("=== MODO WRITE INICIALIZADO ===");
+      Serial.println("GPIO21: OUTPUT configurado (interrupción deshabilitada)");
+      Serial.println("Pin establecido en LOW");
       inicializarGenerador();
       tft.fillScreen(TFT_BLACK);
       tft.setTextColor(TFT_YELLOW);
@@ -106,12 +146,7 @@ void cambiarModo(SystemMode nuevo_modo) {
       tft.setTextDatum(TL_DATUM);
       tft.drawString(TEST_CASE_NAMES[current_test], 5, 5);
       inicializarGrafico();
-      for (int i = 0; i < pulse_pattern.freq_count && i < GRAPH_WIDTH; i++) {
-        actualizarGrafico(pulse_pattern.frequencies[i]);
-      }
-      // Mostrar modo DESPUÉS de dibujar todo (voltaje desactivado en WRITE)
-      mostrarModo();
-      Serial.println("Cambiado a MODO ESCRITURA - Voltaje desactivado");
+      Serial.println("Modo WRITE inicializado");
       break;
       
     case MODE_PRESSURE:
@@ -120,7 +155,7 @@ void cambiarModo(SystemMode nuevo_modo) {
       inicializarModoPressure();
       tft.fillScreen(TFT_BLACK);
       inicializarGrafico();
-      mostrarModo();
+
       Serial.println("Cambiado a MODO PRESION - Histórico reseteado");
       break;
       
@@ -131,8 +166,7 @@ void cambiarModo(SystemMode nuevo_modo) {
         setRecirculatorPower(false);
       }
       tft.fillScreen(TFT_BLACK);
-      mostrarModo();
-      mostrarVoltaje();
+
       mostrarPantallaRecirculador();
       Serial.println("Cambiado a MODO RECIRCULADOR - Generación de pulsos detenida");
       break;
@@ -150,6 +184,7 @@ void cambiarModo(SystemMode nuevo_modo) {
 
 void manejarBotonIzquierdo() {
   updateUserActivity();
+  Serial.println("[BTN] Botón izquierdo - Actividad registrada");
   
   if (current_mode == MODE_WRITE) {
     manejarBotonIzquierdoWrite();
@@ -161,6 +196,9 @@ void manejarBotonIzquierdo() {
 }
 
 void manejarBotonDerecho() {
+  updateUserActivity();
+  Serial.println("[BTN] Botón derecho - Actividad registrada");
+  
   switch (current_mode) {
     case MODE_READ:
       cambiarModo(MODE_WRITE);
@@ -191,9 +229,32 @@ void mostrarInfoSensor() {
 void loop() {
   unsigned long current_time = millis();
   static unsigned long last_button_time = 0;
+  static bool first_loop = true;
+  
+  // En el primer loop, garantizar que no entre en sleep por al menos 2 segundos
+  if (first_loop) {
+    last_user_activity_time = millis();
+    first_loop = false;
+    Serial.println("Loop iniciado - actividad registrada");
+  }
 
-  // Verificar timeout para sleep
-  if (!in_sleep_mode && (current_time - last_user_activity_time >= SLEEP_TIMEOUT_MS)) {
+  // Verificar timeout para sleep (SOLO después de 5 minutos)
+  unsigned long time_since_activity = current_time - last_user_activity_time;
+  
+  // Debug: Mostrar tiempo restante cada 30 segundos
+  static unsigned long last_sleep_debug = 0;
+  if (current_time - last_sleep_debug >= 30000) {
+    unsigned long time_remaining = (SLEEP_TIMEOUT_MS - time_since_activity) / 1000;
+    Serial.print("[SLEEP] Tiempo hasta sleep: ");
+    Serial.print(time_remaining);
+    Serial.println(" segundos");
+    last_sleep_debug = current_time;
+  }
+  
+  if (!in_sleep_mode && time_since_activity >= SLEEP_TIMEOUT_MS) {
+    Serial.print("*** ENTRANDO EN SLEEP - inactividad de ");
+    Serial.print(time_since_activity / 1000);
+    Serial.println(" segundos ***");
     enterSleepMode();
     return;
   }
@@ -241,4 +302,7 @@ void loop() {
   if (current_mode != MODE_WIFI_SCAN && current_mode != MODE_RECIRCULATOR) {
     mostrarInfoSensor();
   }
+  
+  // Actualizar buzzer (no bloqueante)
+  updateBuzzer();
 }

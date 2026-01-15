@@ -48,6 +48,7 @@
 #define WIFI_SCAN_INTERVAL_MS 10000
 #define PRESSURE_READ_INTERVAL_MS 10
 #define SLEEP_TIMEOUT_MS 300000
+#define SLEEP_MAX_DURATION_MS 600000  // Despertar automático después de 10 min
 #define SERIAL_DEBUG_INTERVAL_MS 1000
 #define SERIAL_DEBUG_SLOW_MS 5000
 #define VOLTAGE_ADC_SAMPLES 32
@@ -59,7 +60,7 @@
 #define GRAPH_Y 45
 
 // Constantes del recirculador
-#define RECIRCULATOR_MAX_TIME 120000  // 2 minutos
+#define RECIRCULATOR_MAX_TIME 240000  // 4 minutos
 
 // Constantes WiFi
 #define NETWORKS_PER_PAGE 5

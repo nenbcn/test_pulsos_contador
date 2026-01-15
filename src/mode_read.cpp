@@ -22,7 +22,11 @@ void inicializarModoRead() {
   last_pulse_time = millis();
   pulse_frequency = 0.0;
   
-  Serial.println("Modo READ inicializado - Contadores reseteados");
+  Serial.println("=== MODO READ INICIALIZADO ===");
+  Serial.println("GPIO21: INPUT con interrupción RISING");
+  Serial.print("Estado actual del pin: ");
+  Serial.println(digitalRead(SENSOR_PIN) ? "HIGH" : "LOW");
+  Serial.println("Contadores reseteados");
 }
 
 void manejarModoRead() {
@@ -46,7 +50,8 @@ void manejarModoRead() {
       Serial.print(pulse_count);
       Serial.print(" | Freq: ");
       Serial.print(pulse_frequency, 2);
-      Serial.println(" Hz");
+      Serial.print(" Hz | Pin: ");
+      Serial.println(digitalRead(SENSOR_PIN) ? "HIGH" : "LOW");
       last_serial_time = current_time;
     }
   }

@@ -66,9 +66,9 @@ void setRecirculatorPower(bool state) {
   recirculator_power_state = state;
   
   if (state) {
-    playTone(1000, 150);
+    playTone(1000, 100);
     stopTone();
-    delay(50);
+    // Reducir delay para mejor respuesta
     
     digitalWrite(RELAY_PIN, HIGH);
     recirculator_start_time = millis();
@@ -80,8 +80,8 @@ void setRecirculatorPower(bool state) {
     pixel.setPixelColor(0, pixel.Color(255, 0, 0));
     pixel.show();
     
-    delay(100);
-    playTone(500, 200);
+    // Reducir delay para mejor respuesta
+    playTone(500, 100);
     stopTone();
     Serial.println("🛑 Bomba APAGADA");
   }
@@ -90,7 +90,7 @@ void setRecirculatorPower(bool state) {
 void leerTemperaturaRecirculador() {
   Serial.println("📡 Solicitando temperatura...");
   sensorTemp.requestTemperatures();
-  delay(10);
+  // Eliminar delay - la lectura es suficientemente rápida
   
   float temp = sensorTemp.getTempCByIndex(0);
   Serial.printf("📊 Lectura raw del sensor: %.2f°C\n", temp);
@@ -99,19 +99,8 @@ void leerTemperaturaRecirculador() {
     recirculator_temp = temp;
     Serial.printf("✅ Temperatura válida actualizada: %.2f°C\n", recirculator_temp);
   } else {
-    static bool simulation_warned = false;
-    if (!simulation_warned) {
-      Serial.println("⚠️ SENSOR NO RESPONDE - ACTIVANDO MODO SIMULACIÓN");
-      Serial.println("   Temperatura simulada: 25°C + variación aleatoria");
-      simulation_warned = true;
-    }
-    
-    static float simulated_temp = 25.0;
-    simulated_temp += (random(-10, 10) / 10.0);
-    simulated_temp = constrain(simulated_temp, 23.0, 27.0);
-    
-    recirculator_temp = simulated_temp;
-    Serial.printf("🎭 Temperatura SIMULADA: %.2f°C\n", recirculator_temp);
+    recirculator_temp = -127.0;
+    Serial.println("❌ ERROR: Sensor DS18B20 no responde");
   }
 }
 
@@ -175,26 +164,31 @@ void mostrarPantallaRecirculador() {
   
   tft.setTextColor(TFT_WHITE);
   tft.setTextFont(2);
-  tft.drawString("Estado:", 10, 45);
+  tft.drawString("Estado:", 10, 42);
   
   if (recirculator_power_state) {
     tft.setTextColor(TFT_GREEN);
-    tft.drawString("ENCENDIDO", 80, 45);
+    tft.drawString("ENCENDIDO", 80, 42);
   } else {
     tft.setTextColor(TFT_RED);
-    tft.drawString("APAGADO", 80, 45);
+    tft.drawString("APAGADO", 80, 42);
   }
   
   tft.setTextColor(TFT_CYAN);
   tft.setTextFont(2);
   char temp_str[30];
-  snprintf(temp_str, sizeof(temp_str), "Temp: %.1fC", recirculator_temp);
-  tft.drawString(temp_str, 10, 70);
+  if (recirculator_temp == -127.0) {
+    tft.setTextColor(TFT_RED);
+    snprintf(temp_str, sizeof(temp_str), "Temp: ERROR");
+  } else {
+    snprintf(temp_str, sizeof(temp_str), "Temp: %.1fC", recirculator_temp);
+  }
+  tft.drawString(temp_str, 10, 60);
   
   tft.setTextColor(TFT_YELLOW);
   char max_temp_str[30];
   snprintf(max_temp_str, sizeof(max_temp_str), "Max:  %.1fC", recirculator_max_temp);
-  tft.drawString(max_temp_str, 10, 90);
+  tft.drawString(max_temp_str, 10, 78);
   
   if (recirculator_power_state) {
     tft.setTextColor(TFT_MAGENTA);
@@ -203,13 +197,12 @@ void mostrarPantallaRecirculador() {
     snprintf(time_str, sizeof(time_str), "Tiempo: %02lu:%02lu / %02lu:%02lu",
              elapsed / 60, elapsed % 60,
              total_seconds / 60, total_seconds % 60);
-    tft.drawString(time_str, 10, 110);
+    tft.drawString(time_str, 10, 96);
   }
   
   tft.setTextColor(TFT_DARKGREY);
   tft.setTextFont(1);
-  tft.drawString("[IZQ] ON/OFF", 10, 115);
-  tft.drawString("[DER] Cambiar modo", 10, 125);
+  tft.drawString("[IZQ] ON/OFF", 10, 114);
   
   last_power_state = recirculator_power_state;
   last_temp = recirculator_temp;

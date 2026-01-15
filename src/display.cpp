@@ -2,14 +2,30 @@
 #include "mode_read.h"
 #include "mode_pressure.h"
 
+// Variables para control no bloqueante del buzzer
+static unsigned long buzzer_start_time = 0;
+static int buzzer_duration = 0;
+static bool buzzer_active = false;
+
 void playTone(int frequency, int duration_ms) {
   if (frequency > 0) {
     ledcWriteTone(0, frequency);
     ledcWrite(0, 512);
+    buzzer_active = true;
+    buzzer_start_time = millis();
+    buzzer_duration = duration_ms;
   } else {
     ledcWriteTone(0, 0);
+    buzzer_active = false;
   }
-  delay(duration_ms);
+  // NO usar delay - hacerlo no bloqueante
+}
+
+void updateBuzzer() {
+  if (buzzer_active && (millis() - buzzer_start_time >= buzzer_duration)) {
+    stopTone();
+    buzzer_active = false;
+  }
 }
 
 void stopTone() {

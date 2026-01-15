@@ -17,6 +17,7 @@ void actualizarGraficoGenerico(float* data, int* index, float nuevo_valor,
 
 // Funciones auxiliares
 void playTone(int frequency, int duration_ms);
+void updateBuzzer();
 void stopTone();
 uint16_t getSignalColor(int32_t rssi);
 

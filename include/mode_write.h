@@ -5,6 +5,7 @@
 
 // Variables específicas del modo WRITE
 extern bool generating_pulse;
+extern unsigned long generation_start_time;
 extern unsigned long next_pulse_time;
 extern float pulse_interval;
 extern float target_frequency;

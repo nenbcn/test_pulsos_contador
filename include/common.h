@@ -19,6 +19,7 @@ enum SystemMode {
 };
 
 enum TestCase {
+  TEST_CASE_0,  // Reposo - sin pulsos
   TEST_CASE_1,
   TEST_CASE_2,
   TEST_CASE_3,
@@ -72,6 +73,10 @@ extern float voltaje;
 extern unsigned long last_voltage_update;
 extern unsigned long last_user_activity_time;
 extern bool in_sleep_mode;
+
+// Variables RTC (se mantienen en deep sleep)
+extern RTC_DATA_ATTR SystemMode saved_mode;
+extern RTC_DATA_ATTR bool had_sleep;
 
 // Variables globales - Gráfico
 extern float graph_data[GRAPH_WIDTH];

@@ -3,6 +3,7 @@
 
 // Variables específicas del modo WRITE
 bool generating_pulse = false;
+unsigned long generation_start_time = 0;  // Tiempo para delay antes de empezar
 unsigned long next_pulse_time = 0;
 float pulse_interval = 0;
 float current_pulse_interval = 0;  // Intervalo del pulso actual (se mantiene durante HIGH y LOW)
@@ -15,6 +16,10 @@ unsigned long test_start_time = 0;
 PulsePattern pulse_pattern;
 int current_pulse_index = 0;
 bool pattern_ready = false;
+
+// Variables para dibujado progresivo del gráfico
+bool dibujando_grafico = false;
+int graph_draw_index = 0;
 
 // Variables de timing en microsegundos
 unsigned long next_pulse_time_us = 0;
@@ -71,6 +76,9 @@ float aplicarJitter(float tempo, float jitter_percent, unsigned long pulse_numbe
 
 PulsePhase* getTestPhases(TestCase tc, int* phase_count) {
   switch (tc) {
+    case TEST_CASE_0:
+      *phase_count = 0;  // Sin pulsos - reposo
+      return nullptr;
     case TEST_CASE_1:
       *phase_count = sizeof(test1_phases) / sizeof(PulsePhase);
       return test1_phases;
@@ -94,19 +102,21 @@ PulsePhase* getTestPhases(TestCase tc, int* phase_count) {
 
 void inicializarGenerador() {
   generating_pulse = false;
+  generation_start_time = 0;  // Sin delay
   next_pulse_time = 0;
   current_gen_frequency = 0.0;
   pulse_state = false;
   pattern_ready = false;
   current_pulse_index = 0;
   
-  current_test = TEST_CASE_1;
+  current_test = TEST_CASE_0;  // Empezar en reposo
   test_start_time = millis();
   
   Serial.println("Generador inicializado - Sistema de Test Cases:");
-  Serial.println("Test Case activo: TEST_CASE_1 (Arranque/Parada Rápidos)");
-  Serial.println("\n=== CASOS CON TRANSICIONES PROGRESIVAS (basados en logs reales) ===");
-  Serial.println("  1: Arranque/Parada Rápidos (~1.5s)");
+  Serial.println("Test Case activo: TEST_CASE_0 (Reposo - sin pulsos)");
+  Serial.println("\n=== CASOS DE TEST ===");
+  Serial.println("  0: Reposo - Sin generacion de pulsos");
+  Serial.println("  1: Arranque/Parada Rapidos (~1.5s)");
   Serial.println("     SIN fase estable - arranque 0.25s @ 23.5Hz → parada directa");
   Serial.println();
   Serial.println("  2: Normal - Arranque-Estable-Parada (~6s)");
@@ -122,14 +132,18 @@ void inicializarGenerador() {
   Serial.println();
   Serial.println("  5: Single Pulse - Fugas/Pulsos Aislados (~7s)");
   Serial.println("     5 pulsos INDIVIDUALES con timeout de 1s entre ellos");
-  Serial.println("\nUsar botones para cambiar test case en modo WRITE");
+  Serial.println("\n[IZQ] Cambiar Test Case (en cualquier momento)");
+  Serial.println("[DER] Cambiar modo");
   
+  // Pregenerar TC0 (vacío) y mostrar
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_YELLOW);
+  tft.setTextSize(2);
+  tft.setTextFont(2);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(TEST_CASE_NAMES[current_test], 5, 5);
+  inicializarGrafico();
   preGenerarPatron(current_test);
-  
-  for (int i = 0; i < pulse_pattern.freq_count && i < GRAPH_WIDTH; i++) {
-    graph_data[i] = pulse_pattern.frequencies[i];
-  }
-  graph_index = pulse_pattern.freq_count;
 }
 
 void preGenerarPatron(TestCase tc) {
@@ -218,7 +232,24 @@ void preGenerarPatron(TestCase tc) {
 }
 
 void generarPulsos() {
-  if (!pattern_ready) return;
+  // Si no hay patrón listo, no hacer nada (TC0 o error)
+  if (!pattern_ready) {
+    if (pulse_state) {
+      digitalWrite(SENSOR_PIN, LOW);
+      pulse_state = false;
+    }
+    return;
+  }
+  
+  // Verificar si se debe detener la generación (puede ser por cambio de test case)
+  if (!generating_pulse) {
+    if (pulse_state) {
+      digitalWrite(SENSOR_PIN, LOW);
+      pulse_state = false;
+    }
+    return;
+  }
+  
   if (current_pulse_index >= pulse_pattern.count) {
     if (generating_pulse) {
       Serial.print("*** PATRÓN COMPLETADO: ");
@@ -284,12 +315,44 @@ void generarPulsos() {
 }
 
 void manejarModoWrite() {
+  // Dibujar gráfico progresivamente si es necesario
+  if (dibujando_grafico) {
+    // Dibujar 10 puntos a la vez
+    for (int i = 0; i < 10 && graph_draw_index < pulse_pattern.freq_count && graph_draw_index < GRAPH_WIDTH; i++) {
+      actualizarGrafico(pulse_pattern.frequencies[graph_draw_index]);
+      graph_draw_index++;
+    }
+    
+    // Terminar dibujado si llegamos al final
+    if (graph_draw_index >= pulse_pattern.freq_count || graph_draw_index >= GRAPH_WIDTH) {
+      dibujando_grafico = false;
+      Serial.println("Grafico completado");
+      
+      // Iniciar generación si no es TC0
+      if (current_test != TEST_CASE_0 && pattern_ready) {
+        Serial.println("\n*** GENERACION INICIADA ***");
+        generating_pulse = true;
+        next_pulse_time_us = 0;
+        current_pulse_index = 0;
+      }
+    }
+    return;  // No generar pulsos mientras dibujamos
+  }
+  
+  // Generar pulsos normalmente
   generarPulsos();
 }
 
+void resetModoWrite() {
+  // Resetear estado al salir del modo
+  generating_pulse = false;
+  pattern_ready = false;
+  current_pulse_index = 0;
+  digitalWrite(SENSOR_PIN, LOW);
+}
+
 void manejarBotonIzquierdoWrite() {
-  current_test = (TestCase)((current_test + 1) % 5);
-  
+  // DETENER generación INMEDIATAMENTE
   generating_pulse = false;
   next_pulse_time = 0;
   next_pulse_time_us = 0;
@@ -298,26 +361,36 @@ void manejarBotonIzquierdoWrite() {
   pulse_state = false;
   pattern_ready = false;
   current_pulse_index = 0;
+  digitalWrite(SENSOR_PIN, LOW);
+  
+  // Detener dibujado de gráfico si estaba en proceso
+  dibujando_grafico = false;
+  
+  // Cambiar al siguiente test case
+  current_test = (TestCase)((current_test + 1) % 6);
   test_start_time = millis();
   
-  digitalWrite(SENSOR_PIN, LOW);  // Asegurar que el pin esté LOW
+  Serial.println("\n*** Cambiando a: " + String(TEST_CASE_NAMES[current_test]) + " ***");
   
-  Serial.println("Cambiando a: " + String(TEST_CASE_NAMES[current_test]));
-  
-  preGenerarPatron(current_test);
-  
+  // Actualizar pantalla - solo título
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_YELLOW);
   tft.setTextSize(2);
   tft.setTextFont(2);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(TEST_CASE_NAMES[current_test], 5, 5);
-  
   inicializarGrafico();
-  for (int i = 0; i < pulse_pattern.freq_count && i < GRAPH_WIDTH; i++) {
-    actualizarGrafico(pulse_pattern.frequencies[i]);
-  }
   
-  // Mostrar modo DESPUÉS de dibujar todo (voltaje desactivado en WRITE)
-  mostrarModo();
+  // Pregenerar patron
+  preGenerarPatron(current_test);
+  
+  // Activar dibujado progresivo del gráfico
+  if (pattern_ready && pulse_pattern.freq_count > 0) {
+    dibujando_grafico = true;
+    graph_draw_index = 0;
+    Serial.println("Iniciando dibujado progresivo del grafico...");
+  } else {
+    // TC0 o sin datos - no hay que dibujar
+    dibujando_grafico = false;
+  }
 }

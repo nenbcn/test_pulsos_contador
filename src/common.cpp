@@ -1,6 +1,10 @@
 #include "common.h"
 #include "esp_sleep.h"
 
+// Memoria RTC para mantener datos en deep sleep
+RTC_DATA_ATTR SystemMode saved_mode = MODE_READ;
+RTC_DATA_ATTR bool had_sleep = false;
+
 // Variables globales - Display y hardware
 TFT_eSPI tft = TFT_eSPI();
 OneWire oneWireRecirculator(TEMP_SENSOR_PIN);
@@ -45,6 +49,7 @@ int mario_gameover_num_notes = sizeof(mario_gameover_melody) / sizeof(mario_game
 
 // Arrays de test cases
 const char* TEST_CASE_NAMES[] = {
+  "TC0: Reposo",
   "TC1: Rapid",
   "TC2: Normal", 
   "TC3: Compnd",
@@ -88,14 +93,25 @@ void IRAM_ATTR wakeUpInterrupt() {
 
 void enterSleepMode() {
   Serial.println("Entrando en modo sleep por inactividad...");
+  Serial.println("Wake-up configurado SOLO por botones (GPIO0 y GPIO35)");
   
+  // Guardar modo actual en RTC memory
+  saved_mode = current_mode;
+  had_sleep = true;
+  
+  // Apagar pantalla
   digitalWrite(4, LOW);
   tft.writecommand(0x10);
   
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
-  uint64_t ext1_mask = 1ULL << GPIO_NUM_35;
+  // Configurar wake-up SOLO por botones
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);   // Botón izquierdo (LOW activo)
+  uint64_t ext1_mask = 1ULL << GPIO_NUM_35;      // Botón derecho
   esp_sleep_enable_ext1_wakeup(ext1_mask, ESP_EXT1_WAKEUP_ALL_LOW);
   
+  // NO hay timer wake-up - solo se despierta con botones para ahorrar batería
+  
   in_sleep_mode = true;
+  Serial.flush();  // Asegurar que serial envía todo antes de sleep
+  delay(100);
   esp_deep_sleep_start();
 }
